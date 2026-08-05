@@ -3,7 +3,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 from flask import Flask, jsonify, request, send_from_directory
@@ -176,6 +176,67 @@ def resolve_krx_code(symbol):
     return None
 
 
+def parse_korean_date(value):
+    """Parse a Naver-style "2002년 10월 14일" string into "2002-10-14"."""
+    if not value:
+        return None
+    m = re.search(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일", value)
+    if not m:
+        return None
+    year, month, day = m.groups()
+    return f"{year}-{int(month):02d}-{int(day):02d}"
+
+
+def fetch_naver_coinfo(code):
+    """Scrape the desktop ETF info page for fields the mobile API lacks
+    (listing date, fund type/category). No auth required."""
+    url = f"https://finance.naver.com/item/coinfo.naver?code={code}"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=8)
+        r.raise_for_status()
+        text = r.content.decode("euc-kr", errors="replace")
+    except requests.RequestException:
+        return {}
+    result = {}
+    m = re.search(r"상장일</th>\s*<td>([^<]+)</td>", text)
+    if m:
+        result["inceptionDate"] = parse_korean_date(m.group(1).strip())
+    m = re.search(r"유형</th>\s*<td><span[^>]*>([^<]+)</span></td>", text)
+    if m:
+        result["category"] = m.group(1).strip()
+    return result
+
+
+def fetch_60d_averages(code):
+    """60-trading-day average volume/value, computed from daily OHLCV
+    history (KRX doesn't expose a simple public endpoint with this
+    pre-computed, so we derive it ourselves)."""
+    end = datetime.now().strftime("%Y%m%d")
+    start = (datetime.now() - timedelta(days=130)).strftime("%Y%m%d")
+    url = f"https://api.stock.naver.com/chart/domestic/item/{code}/day"
+    try:
+        r = requests.get(url, params={"startDateTime": start, "endDateTime": end}, headers=HEADERS, timeout=8)
+        r.raise_for_status()
+        rows = r.json()
+    except (requests.RequestException, ValueError):
+        return {}
+    if not isinstance(rows, list) or not rows:
+        return {}
+    recent = rows[-60:]
+    volumes = [row["accumulatedTradingVolume"] for row in recent if row.get("accumulatedTradingVolume") is not None]
+    values = [
+        row["accumulatedTradingVolume"] * row["closePrice"]
+        for row in recent
+        if row.get("accumulatedTradingVolume") is not None and row.get("closePrice") is not None
+    ]
+    if not volumes:
+        return {}
+    return {
+        "avgVolume60d": sum(volumes) / len(volumes),
+        "avgTradingValue60d": (sum(values) / len(values)) if values else None,
+    }
+
+
 def fetch_domestic_quote(code):
     listing = None
     try:
@@ -196,6 +257,9 @@ def fetch_domestic_quote(code):
     name = (listing or {}).get("itemname") or detail.get("stockName")
     if not name:
         return {"symbol": code, "hasData": False}
+
+    coinfo = fetch_naver_coinfo(code)
+    averages_60d = fetch_60d_averages(code)
 
     total_map = {i["code"]: i.get("value") for i in detail.get("totalInfos", []) if "code" in i}
     key_ind = detail.get("etfKeyIndicator") or {}
@@ -224,11 +288,13 @@ def fetch_domestic_quote(code):
         "volume": num(total_map.get("accumulatedTradingVolume")),
         "totalAssets": parse_krw(key_ind.get("totalNav")),
         "expenseRatio": (expense_ratio / 100) if expense_ratio is not None else None,
-        "category": None,
+        "category": coinfo.get("category"),
         "fundFamily": key_ind.get("issuerName"),
         "exchange": "KRX",
         "yield": (dividend_yield / 100) if dividend_yield is not None else None,
-        "inceptionDate": None,
+        "inceptionDate": coinfo.get("inceptionDate"),
+        "avgVolume60d": averages_60d.get("avgVolume60d"),
+        "avgTradingValue60d": averages_60d.get("avgTradingValue60d"),
         "hasData": price is not None,
         "updatedAt": datetime.now().isoformat(),
     }
