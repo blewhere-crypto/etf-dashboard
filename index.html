@@ -377,6 +377,8 @@ function renderDetail(d) {
         <div><div class="stat-label">기초지수(BM)</div><div class="stat-value">${d.benchmarkIndex || '-'}</div></div>
         <div><div class="stat-label">변동성 (${d.volatilityPeriod || '기간 미상'})</div><div class="stat-value">${d.volatility != null ? d.volatility.toFixed(2) + '%' : '-'}</div></div>
         <div><div class="stat-label">기초지수 변동성 (${d.benchmarkVolatilityPeriod || '기간 미상'})</div><div class="stat-value">${d.benchmarkVolatility != null ? d.benchmarkVolatility.toFixed(2) + '%' : '-'}</div></div>
+        <div><div class="stat-label">VaR 97.5% (${d.var975Period || '기간 미상'})</div><div class="stat-value">${d.var975 != null ? '-' + d.var975.toFixed(2) + '%' : '-'}</div></div>
+        <div><div class="stat-label">기초지수 VaR 97.5% (${d.benchmarkVar975Period || '기간 미상'})</div><div class="stat-value">${d.benchmarkVar975 != null ? '-' + d.benchmarkVar975.toFixed(2) + '%' : '-'}</div></div>
       </div>
       <div class="updated-at">조회 시각: ${new Date(d.updatedAt).toLocaleString('ko-KR')}</div>
     </div>

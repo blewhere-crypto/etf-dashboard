@@ -231,10 +231,27 @@ def format_period_label(days):
     return f"{months}개월"
 
 
-def compute_volatility_and_period(dates, closes):
-    """Annualized volatility (%) from parallel lists of dates and closes,
-    using the standard deviation of daily returns scaled by sqrt(252).
-    Returns (volatility, days_covered) — days_covered reflects whatever
+def historical_var(returns, confidence=0.975):
+    """Empirical (historical) VaR at the given confidence level, as a
+    positive loss percentage — e.g. 2.15 means "on the worst 2.5% of days
+    in the sample, the loss exceeded 2.15%". Uses linear interpolation
+    between ranks, same convention as numpy's default percentile method."""
+    if not returns:
+        return None
+    ordered = sorted(returns)
+    n = len(ordered)
+    idx = (1 - confidence) * (n - 1)
+    lower = int(idx)
+    upper = min(lower + 1, n - 1)
+    frac = idx - lower
+    percentile_return = ordered[lower] + frac * (ordered[upper] - ordered[lower])
+    return -percentile_return * 100
+
+
+def compute_risk_stats(dates, closes):
+    """Annualized volatility (%) and 1-day historical VaR at 97.5%
+    confidence (%), from parallel lists of dates and closes. Returns
+    (volatility, var975, days_covered) — days_covered reflects whatever
     history is actually available, which may be less than the 3y window
     requested (e.g. a recently-listed fund)."""
     points = sorted(
@@ -242,17 +259,18 @@ def compute_volatility_and_period(dates, closes):
         key=lambda p: p[0],
     )
     if len(points) < 2:
-        return None, None
+        return None, None, None
     values = [c for _, c in points]
     returns = [(curr - prev) / prev for prev, curr in zip(values, values[1:]) if prev]
     if len(returns) < 2:
-        return None, None
+        return None, None, None
     volatility = statistics.stdev(returns) * (252 ** 0.5) * 100
+    var975 = historical_var(returns, 0.975)
     days_covered = (points[-1][0] - points[0][0]).days
-    return volatility, days_covered
+    return volatility, var975, days_covered
 
 
-def fetch_naver_daily_series_volatility(base_url):
+def fetch_naver_daily_series_risk_stats(base_url):
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=3 * 365 + 14)).strftime("%Y%m%d")
     try:
@@ -260,9 +278,9 @@ def fetch_naver_daily_series_volatility(base_url):
         r.raise_for_status()
         rows = r.json()
     except (requests.RequestException, ValueError):
-        return None, None
+        return None, None, None
     if not isinstance(rows, list):
-        return None, None
+        return None, None, None
     dates = []
     for row in rows:
         d = row.get("localDate")
@@ -271,11 +289,11 @@ def fetch_naver_daily_series_volatility(base_url):
         except (ValueError, TypeError):
             dates.append(None)
     closes = [row.get("closePrice") for row in rows]
-    return compute_volatility_and_period(dates, closes)
+    return compute_risk_stats(dates, closes)
 
 
-def fetch_domestic_volatility_3y(code):
-    return fetch_naver_daily_series_volatility(f"https://api.stock.naver.com/chart/domestic/item/{code}/day")
+def fetch_domestic_risk_stats(code):
+    return fetch_naver_daily_series_risk_stats(f"https://api.stock.naver.com/chart/domestic/item/{code}/day")
 
 
 # Common ETF benchmark index names -> Naver's domestic index chart code.
@@ -361,27 +379,27 @@ def resolve_overseas_index_ticker(benchmark_name):
     return None
 
 
-def fetch_domestic_index_volatility_3y(index_code):
+def fetch_domestic_index_risk_stats(index_code):
     if not index_code:
-        return None, None
-    return fetch_naver_daily_series_volatility(f"https://api.stock.naver.com/chart/domestic/index/{index_code}/day")
+        return None, None, None
+    return fetch_naver_daily_series_risk_stats(f"https://api.stock.naver.com/chart/domestic/index/{index_code}/day")
 
 
-def fetch_overseas_volatility_3y(symbol):
+def fetch_overseas_risk_stats(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     try:
         r = requests.get(url, params={"range": "3y", "interval": "1d"}, headers=HEADERS, timeout=10)
         r.raise_for_status()
         result = r.json().get("chart", {}).get("result")
     except requests.RequestException:
-        return None, None
+        return None, None, None
     if not result:
-        return None, None
+        return None, None, None
     timestamps = result[0].get("timestamp") or []
     quotes = result[0].get("indicators", {}).get("quote") or [{}]
     closes = quotes[0].get("close", [])
     dates = [datetime.utcfromtimestamp(ts).date() if ts is not None else None for ts in timestamps]
-    return compute_volatility_and_period(dates, closes)
+    return compute_risk_stats(dates, closes)
 
 
 def fetch_60d_averages(code):
@@ -437,14 +455,17 @@ def fetch_domestic_quote(code):
 
     coinfo = fetch_naver_coinfo(code)
     averages_60d = fetch_60d_averages(code)
-    volatility, volatility_days = fetch_domestic_volatility_3y(code)
+    volatility, var975, volatility_days = fetch_domestic_risk_stats(code)
 
     benchmark_index_code = resolve_domestic_index_code(coinfo.get("benchmarkIndex"))
     if benchmark_index_code:
-        benchmark_volatility, benchmark_volatility_days = fetch_domestic_index_volatility_3y(benchmark_index_code)
+        benchmark_volatility, benchmark_var975, benchmark_volatility_days = fetch_domestic_index_risk_stats(benchmark_index_code)
     else:
         overseas_index_ticker = resolve_overseas_index_ticker(coinfo.get("benchmarkIndex"))
-        benchmark_volatility, benchmark_volatility_days = fetch_overseas_volatility_3y(overseas_index_ticker) if overseas_index_ticker else (None, None)
+        if overseas_index_ticker:
+            benchmark_volatility, benchmark_var975, benchmark_volatility_days = fetch_overseas_risk_stats(overseas_index_ticker)
+        else:
+            benchmark_volatility, benchmark_var975, benchmark_volatility_days = None, None, None
 
     total_map = {i["code"]: i.get("value") for i in detail.get("totalInfos", []) if "code" in i}
     key_ind = detail.get("etfKeyIndicator") or {}
@@ -483,8 +504,12 @@ def fetch_domestic_quote(code):
         "benchmarkIndex": coinfo.get("benchmarkIndex"),
         "volatility": volatility,
         "volatilityPeriod": format_period_label(volatility_days),
+        "var975": var975,
+        "var975Period": format_period_label(volatility_days),
         "benchmarkVolatility": benchmark_volatility,
         "benchmarkVolatilityPeriod": format_period_label(benchmark_volatility_days),
+        "benchmarkVar975": benchmark_var975,
+        "benchmarkVar975Period": format_period_label(benchmark_volatility_days),
         "hasData": price is not None,
         "updatedAt": datetime.now().isoformat(),
     }
@@ -585,7 +610,7 @@ def fetch_quote(symbol):
     prev_close = meta.get("previousClose") or meta.get("chartPreviousClose")
     change = price - prev_close if prev_close is not None else None
     change_pct = (change / prev_close * 100) if change is not None and prev_close else None
-    volatility, volatility_days = fetch_overseas_volatility_3y(symbol)
+    volatility, var975, volatility_days = fetch_overseas_risk_stats(symbol)
 
     return {
         "symbol": symbol,
@@ -613,8 +638,12 @@ def fetch_quote(symbol):
         "benchmarkIndex": None,
         "volatility": volatility,
         "volatilityPeriod": format_period_label(volatility_days),
+        "var975": var975,
+        "var975Period": format_period_label(volatility_days),
         "benchmarkVolatility": None,
         "benchmarkVolatilityPeriod": None,
+        "benchmarkVar975": None,
+        "benchmarkVar975Period": None,
         "hasData": True,
         "updatedAt": datetime.now().isoformat(),
     }
