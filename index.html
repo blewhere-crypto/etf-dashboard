@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ETF 한눈에 보기</title>
+<style>
+  :root {
+    --bg: #f5f7fb;
+    --card: #ffffff;
+    --border: #e3e7ef;
+    --text: #16181d;
+    --text-muted: #6b7280;
+    --accent: #2554ea;
+    --accent-soft: #eaf0ff;
+    --up: #d92b2b;
+    --down: #1a63d6;
+    --radius: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216;
+      --card: #1a1e25;
+      --border: #2a2f38;
+      --text: #eef1f6;
+      --text-muted: #9aa3b2;
+      --accent: #5b8bff;
+      --accent-soft: #1d2a4a;
+      --up: #ff5c5c;
+      --down: #5b9dff;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1216;
+    --card: #1a1e25;
+    --border: #2a2f38;
+    --text: #eef1f6;
+    --text-muted: #9aa3b2;
+    --accent: #5b8bff;
+    --accent-soft: #1d2a4a;
+    --up: #ff5c5c;
+    --down: #5b9dff;
+  }
+  :root[data-theme="light"] {
+    --bg: #f5f7fb;
+    --card: #ffffff;
+    --border: #e3e7ef;
+    --text: #16181d;
+    --text-muted: #6b7280;
+    --accent: #2554ea;
+    --accent-soft: #eaf0ff;
+    --up: #d92b2b;
+    --down: #1a63d6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Pretendard", "Malgun Gothic", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 28px 20px 80px; }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 24px;
+  }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.3px; }
+  h1 span { color: var(--accent); }
+  .theme-btn {
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text);
+    border-radius: 999px;
+    width: 38px; height: 38px;
+    cursor: pointer;
+    font-size: 16px;
+  }
+  .search-box {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .search-box input {
+    flex: 1;
+    padding: 14px 16px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text);
+    font-size: 15px;
+    outline: none;
+  }
+  .search-box input:focus { border-color: var(--accent); }
+  .search-box button {
+    padding: 0 22px;
+    border-radius: var(--radius);
+    border: none;
+    background: var(--accent);
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .search-box button:disabled { opacity: 0.6; cursor: default; }
+  .hint { font-size: 13px; color: var(--text-muted); margin: 0 0 20px 4px; }
+
+  .candidates {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 20px;
+  }
+  .candidate {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--card);
+    cursor: pointer;
+  }
+  .candidate:hover { border-color: var(--accent); }
+  .candidate .meta { font-size: 13px; color: var(--text-muted); }
+  .badge {
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px;
+    margin-bottom: 24px;
+  }
+  .card-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .card-title { font-size: 17px; font-weight: 700; margin: 0 0 4px; }
+  .card-sub { font-size: 13px; color: var(--text-muted); }
+  .save-btn {
+    border: 1px solid var(--accent);
+    background: transparent;
+    color: var(--accent);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .save-btn.saved { background: var(--accent); color: #fff; }
+
+  .price-row { display: flex; align-items: baseline; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
+  .price { font-size: 32px; font-weight: 700; }
+  .change { font-size: 15px; font-weight: 600; }
+  .change.up { color: var(--up); }
+  .change.down { color: var(--down); }
+  .change.flat { color: var(--text-muted); }
+
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 14px;
+  }
+  .stat-label { font-size: 12px; color: var(--text-muted); margin-bottom: 3px; }
+  .stat-value { font-size: 14px; font-weight: 600; }
+  .updated-at { font-size: 12px; color: var(--text-muted); margin-top: 16px; text-align: right; }
+
+  .msg { padding: 14px 16px; border-radius: 10px; font-size: 14px; margin-bottom: 20px; }
+  .msg.error { background: #fdeaea; color: #b42318; }
+  :root[data-theme="dark"] .msg.error { background: #3a1a1a; color: #ff8a8a; }
+  @media (prefers-color-scheme: dark) {
+    .msg.error { background: #3a1a1a; color: #ff8a8a; }
+  }
+  .msg.loading { background: var(--accent-soft); color: var(--accent); }
+
+  section.saved-section h2 { font-size: 15px; color: var(--text-muted); margin: 0 0 12px; }
+  .saved-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+  .saved-card {
+    position: relative;
+    border: 1px solid var(--border);
+    background: var(--card);
+    border-radius: 10px;
+    padding: 12px 14px;
+    cursor: pointer;
+  }
+  .saved-card:hover { border-color: var(--accent); }
+  .saved-card .remove {
+    position: absolute; top: 6px; right: 8px;
+    border: none; background: transparent; color: var(--text-muted);
+    cursor: pointer; font-size: 14px; line-height: 1;
+  }
+  .saved-card .remove:hover { color: var(--up); }
+  .saved-card .name { font-size: 13px; font-weight: 600; margin-bottom: 4px; padding-right: 16px; }
+  .saved-card .sym { font-size: 12px; color: var(--text-muted); }
+  .empty { font-size: 13px; color: var(--text-muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span>ETF</span> 한눈에 보기</h1>
+    <button class="theme-btn" id="themeToggle" title="다크모드 전환">🌙</button>
+  </header>
+
+  <div class="search-box">
+    <input id="searchInput" type="text" placeholder="종목명 또는 코드/티커 입력 (예: KODEX 200, 069500, SPY)" autocomplete="off" />
+    <button id="searchBtn">검색</button>
+  </div>
+  <p class="hint">국내 ETF는 6자리 코드(예: 069500), 해외 ETF는 티커(예: SPY, QQQ)로도 검색할 수 있어요.</p>
+
+  <div id="messageArea"></div>
+  <div id="candidatesArea" class="candidates"></div>
+  <div id="detailArea"></div>
+
+  <section class="saved-section">
+    <h2>저장한 ETF</h2>
+    <div id="savedArea" class="saved-grid"></div>
+  </section>
+</div>
+
+<script>
+const API = '';
+const $ = (sel) => document.querySelector(sel);
+const messageArea = $('#messageArea');
+const candidatesArea = $('#candidatesArea');
+const detailArea = $('#detailArea');
+const savedArea = $('#savedArea');
+const searchInput = $('#searchInput');
+const searchBtn = $('#searchBtn');
+
+let savedList = [];
+
+function fmtNum(n, digits = 2) {
+  if (n === null || n === undefined || Number.isNaN(n)) return '-';
+  return Number(n).toLocaleString('ko-KR', { maximumFractionDigits: digits });
+}
+function fmtCompact(n) {
+  if (n === null || n === undefined) return '-';
+  const abs = Math.abs(n);
+  if (abs >= 1e12) return (n / 1e12).toFixed(2) + '조';
+  if (abs >= 1e8) return (n / 1e8).toFixed(2) + '억';
+  if (abs >= 1e4) return (n / 1e4).toFixed(1) + '만';
+  return fmtNum(n, 0);
+}
+function fmtAssets(n, currency) {
+  if (n === null || n === undefined) return '-';
+  if (currency === 'KRW') return fmtCompact(n) + '원';
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return (n / 1e9).toFixed(2) + 'B ' + (currency || '');
+  if (abs >= 1e6) return (n / 1e6).toFixed(2) + 'M ' + (currency || '');
+  return fmtNum(n, 0) + ' ' + (currency || '');
+}
+function fmtDate(v) {
+  if (!v) return '-';
+  try {
+    const d = typeof v === 'number' ? new Date(v * 1000) : new Date(v);
+    if (Number.isNaN(d.getTime())) return '-';
+    return d.toLocaleDateString('ko-KR');
+  } catch { return '-'; }
+}
+
+function showMessage(text, type = 'loading') {
+  messageArea.innerHTML = `<div class="msg ${type}">${text}</div>`;
+}
+function clearMessage() { messageArea.innerHTML = ''; }
+
+async function api(path, options) {
+  const res = await fetch(API + path, options);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || '요청에 실패했습니다.');
+  return data;
+}
+
+async function doSearch() {
+  const q = searchInput.value.trim();
+  if (!q) return;
+  candidatesArea.innerHTML = '';
+  detailArea.innerHTML = '';
+  searchBtn.disabled = true;
+  showMessage('검색 중입니다…');
+  try {
+    const data = await api('/api/search?q=' + encodeURIComponent(q));
+    clearMessage();
+    const results = data.results || [];
+    if (results.length === 0) {
+      showMessage('검색 결과가 없습니다. 종목명이나 코드를 다시 확인해주세요.', 'error');
+      return;
+    }
+    if (results.length === 1) {
+      loadDetail(results[0].symbol);
+    } else {
+      renderCandidates(results);
+    }
+  } catch (e) {
+    showMessage(e.message, 'error');
+  } finally {
+    searchBtn.disabled = false;
+  }
+}
+
+function renderCandidates(results) {
+  candidatesArea.innerHTML = results.map(r => `
+    <div class="candidate" data-symbol="${r.symbol}">
+      <div>
+        <div>${r.name}</div>
+        <div class="meta">${r.symbol} · ${r.exchange || ''}</div>
+      </div>
+      <span class="badge">${r.market}</span>
+    </div>
+  `).join('');
+  candidatesArea.querySelectorAll('.candidate').forEach(el => {
+    el.addEventListener('click', () => loadDetail(el.dataset.symbol));
+  });
+}
+
+async function loadDetail(symbol) {
+  candidatesArea.innerHTML = '';
+  showMessage('정보를 불러오는 중입니다…');
+  try {
+    const d = await api('/api/quote/' + encodeURIComponent(symbol));
+    clearMessage();
+    renderDetail(d);
+  } catch (e) {
+    showMessage(e.message, 'error');
+  }
+}
+
+function renderDetail(d) {
+  if (!d.hasData) {
+    detailArea.innerHTML = `<div class="msg error">"${d.symbol}"에 대한 시세 정보를 찾을 수 없습니다.</div>`;
+    return;
+  }
+  const changeClass = d.change > 0 ? 'up' : d.change < 0 ? 'down' : 'flat';
+  const sign = d.change > 0 ? '+' : '';
+  const isSaved = savedList.some(s => s.symbol === d.symbol);
+
+  detailArea.innerHTML = `
+    <div class="card">
+      <div class="card-top">
+        <div>
+          <p class="card-title">${d.name}</p>
+          <p class="card-sub">${d.symbol} · ${d.market} · ${d.exchange || ''}</p>
+        </div>
+        <button class="save-btn ${isSaved ? 'saved' : ''}" id="saveBtn">${isSaved ? '★ 저장됨' : '☆ 저장'}</button>
+      </div>
+      <div class="price-row">
+        <div class="price">${fmtNum(d.price)} <span style="font-size:14px;color:var(--text-muted);">${d.currency || ''}</span></div>
+        <div class="change ${changeClass}">${sign}${fmtNum(d.change)} (${sign}${fmtNum(d.changePercent)}%)</div>
+      </div>
+      <div class="stat-grid">
+        <div><div class="stat-label">순자산총액(AUM)</div><div class="stat-value">${d.totalAssets ? fmtAssets(d.totalAssets, d.currency) : '-'}</div></div>
+        <div><div class="stat-label">총보수(연)</div><div class="stat-value">${d.expenseRatio ? (d.expenseRatio * 100).toFixed(2) + '%' : '-'}</div></div>
+        <div><div class="stat-label">카테고리</div><div class="stat-value">${d.category || '-'}</div></div>
+        <div><div class="stat-label">운용사</div><div class="stat-value">${d.fundFamily || '-'}</div></div>
+        <div><div class="stat-label">52주 최고</div><div class="stat-value">${fmtNum(d.fiftyTwoWeekHigh)}</div></div>
+        <div><div class="stat-label">52주 최저</div><div class="stat-value">${fmtNum(d.fiftyTwoWeekLow)}</div></div>
+        <div><div class="stat-label">거래량</div><div class="stat-value">${fmtCompact(d.volume)}</div></div>
+        <div><div class="stat-label">배당수익률</div><div class="stat-value">${d.yield ? (d.yield * 100).toFixed(2) + '%' : '-'}</div></div>
+        <div><div class="stat-label">설정(상장)일</div><div class="stat-value">${fmtDate(d.inceptionDate)}</div></div>
+      </div>
+      <div class="updated-at">조회 시각: ${new Date(d.updatedAt).toLocaleString('ko-KR')}</div>
+    </div>
+  `;
+
+  $('#saveBtn').addEventListener('click', () => toggleSave(d));
+}
+
+async function toggleSave(d) {
+  const isSaved = savedList.some(s => s.symbol === d.symbol);
+  try {
+    if (isSaved) {
+      savedList = await api('/api/saved/' + encodeURIComponent(d.symbol), { method: 'DELETE' });
+    } else {
+      savedList = await api('/api/saved', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: d.symbol, name: d.name, market: d.market })
+      });
+    }
+    renderDetail(d);
+    renderSaved();
+  } catch (e) {
+    showMessage(e.message, 'error');
+  }
+}
+
+function renderSaved() {
+  if (savedList.length === 0) {
+    savedArea.innerHTML = '<p class="empty">아직 저장한 ETF가 없습니다. 검색 후 ☆ 저장 버튼을 눌러보세요.</p>';
+    return;
+  }
+  savedArea.innerHTML = savedList.map(s => `
+    <div class="saved-card" data-symbol="${s.symbol}">
+      <button class="remove" data-remove="${s.symbol}" title="삭제">✕</button>
+      <div class="name">${s.name}</div>
+      <div class="sym">${s.symbol} · ${s.market}</div>
+    </div>
+  `).join('');
+  savedArea.querySelectorAll('.saved-card').forEach(el => {
+    el.addEventListener('click', (e) => {
+      if (e.target.dataset.remove) return;
+      loadDetail(el.dataset.symbol);
+    });
+  });
+  savedArea.querySelectorAll('[data-remove]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const symbol = btn.dataset.remove;
+      savedList = await api('/api/saved/' + encodeURIComponent(symbol), { method: 'DELETE' });
+      renderSaved();
+    });
+  });
+}
+
+async function initSaved() {
+  try {
+    savedList = await api('/api/saved');
+    renderSaved();
+  } catch {
+    savedArea.innerHTML = '<p class="empty">저장 목록을 불러오지 못했습니다.</p>';
+  }
+}
+
+searchBtn.addEventListener('click', doSearch);
+searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+
+const themeToggle = $('#themeToggle');
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  themeToggle.textContent = theme === 'dark' ? '☀️' : '🌙';
+  localStorage.setItem('etf-theme', theme);
+}
+const savedTheme = localStorage.getItem('etf-theme');
+if (savedTheme) applyTheme(savedTheme);
+themeToggle.addEventListener('click', () => {
+  const current = document.documentElement.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  applyTheme(current === 'dark' ? 'light' : 'dark');
+});
+
+initSaved();
+</script>
+</body>
+</html>
