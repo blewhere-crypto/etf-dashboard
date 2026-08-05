@@ -2,6 +2,7 @@ import json
 import os
 import re
 import threading
+import time
 from datetime import datetime
 
 import requests
@@ -68,7 +69,147 @@ def write_saved(items):
 
 
 def market_of(symbol):
-    return "국내" if symbol.endswith((".KS", ".KQ")) else "해외"
+    return "국내" if re.fullmatch(r"\d{6}", symbol) or symbol.endswith((".KS", ".KQ")) else "해외"
+
+
+def num(value):
+    """Parse a comma-formatted numeric string ("13,660,080") into a float."""
+    if value is None:
+        return None
+    try:
+        return float(str(value).replace(",", "").replace("원", "").strip())
+    except ValueError:
+        return None
+
+
+def parse_krw(value):
+    """Parse Korean-unit money strings like "24조 4,433억" into a won amount."""
+    if not value:
+        return None
+    s = str(value).replace(",", "")
+    total = 0.0
+    matched = False
+    for unit, mult in (("조", 1e12), ("억", 1e8), ("만", 1e4)):
+        m = re.search(rf"(-?\d+(?:\.\d+)?){unit}", s)
+        if m:
+            total += float(m.group(1)) * mult
+            s = s[: m.start()] + s[m.end() :]
+            matched = True
+    remainder = re.search(r"-?\d+(?:\.\d+)?", s)
+    if remainder:
+        total += float(remainder.group(0))
+        matched = True
+    return total if matched else None
+
+
+# Full KRX-listed ETF universe, sourced from Naver Finance (which mirrors
+# official KRX data). Cached in memory since it's ~1000+ rows and rarely
+# changes within a session; used to power accurate Korean-name/code search
+# and as a quick lookup for the domestic quote endpoint.
+_krx_list_cache = {"items": None, "fetched_at": 0}
+_KRX_LIST_TTL_SECONDS = 600
+
+
+def fetch_krx_etf_list():
+    now = time.time()
+    cache = _krx_list_cache
+    if cache["items"] is not None and now - cache["fetched_at"] < _KRX_LIST_TTL_SECONDS:
+        return cache["items"]
+    url = "https://finance.naver.com/api/sise/etfItemList.nhn"
+    r = requests.get(url, headers=HEADERS, timeout=10)
+    r.raise_for_status()
+    data = json.loads(r.content.decode("cp949", errors="replace"))
+    items = data.get("result", {}).get("etfItemList", [])
+    cache["items"] = items
+    cache["fetched_at"] = now
+    return items
+
+
+def search_krx_etfs(query):
+    query = query.strip().lower()
+    if not query:
+        return []
+    try:
+        items = fetch_krx_etf_list()
+    except requests.RequestException:
+        return []
+    exact, prefix, contains = [], [], []
+    for it in items:
+        code = it.get("itemcode", "")
+        name = (it.get("itemname") or "")
+        name_lower = name.lower()
+        candidate = {
+            "symbol": code,
+            "name": name,
+            "exchange": "KRX",
+            "type": "ETF",
+            "market": "국내",
+        }
+        if query == code or query == name_lower:
+            exact.append(candidate)
+        elif code.startswith(query) or name_lower.startswith(query):
+            prefix.append(candidate)
+        elif query in name_lower:
+            contains.append(candidate)
+    return (exact + prefix + contains)[:8]
+
+
+def fetch_domestic_quote(code):
+    listing = None
+    try:
+        listing = next((it for it in fetch_krx_etf_list() if it.get("itemcode") == code), None)
+    except requests.RequestException:
+        listing = None
+
+    detail = {}
+    try:
+        r = requests.get(
+            f"https://m.stock.naver.com/api/stock/{code}/integration", headers=HEADERS, timeout=8
+        )
+        if r.status_code == 200:
+            detail = r.json()
+    except requests.RequestException:
+        detail = {}
+
+    name = (listing or {}).get("itemname") or detail.get("stockName")
+    if not name:
+        return {"symbol": code, "hasData": False}
+
+    total_map = {i["code"]: i.get("value") for i in detail.get("totalInfos", []) if "code" in i}
+    key_ind = detail.get("etfKeyIndicator") or {}
+
+    price = num((listing or {}).get("nowVal")) or num(total_map.get("lastClosePrice"))
+    prev_close = num(total_map.get("lastClosePrice"))
+    change = price - prev_close if price is not None and prev_close is not None else None
+    change_pct = (change / prev_close * 100) if change and prev_close else None
+
+    expense_ratio = key_ind.get("totalFee")
+    dividend_yield = key_ind.get("dividendYieldTtm")
+
+    return {
+        "symbol": code,
+        "name": name,
+        "market": "국내",
+        "currency": "KRW",
+        "price": price,
+        "change": change,
+        "changePercent": change_pct,
+        "previousClose": prev_close,
+        "dayHigh": num(total_map.get("highPrice")),
+        "dayLow": num(total_map.get("lowPrice")),
+        "fiftyTwoWeekHigh": num(total_map.get("highPriceOf52WeeksAdjusted") or total_map.get("highPriceOf52Weeks")),
+        "fiftyTwoWeekLow": num(total_map.get("lowPriceOf52WeeksAdjusted") or total_map.get("lowPriceOf52Weeks")),
+        "volume": num(total_map.get("accumulatedTradingVolume")),
+        "totalAssets": parse_krw(key_ind.get("totalNav")),
+        "expenseRatio": (expense_ratio / 100) if expense_ratio is not None else None,
+        "category": None,
+        "fundFamily": key_ind.get("issuerName"),
+        "exchange": "KRX",
+        "yield": (dividend_yield / 100) if dividend_yield is not None else None,
+        "inceptionDate": None,
+        "hasData": price is not None,
+        "updatedAt": datetime.now().isoformat(),
+    }
 
 
 def yahoo_search(query):
@@ -96,25 +237,8 @@ def yahoo_search(query):
 
 def resolve_candidates(query):
     query = query.strip()
-    candidates = []
-
-    if re.fullmatch(r"\d{6}", query):
-        for suffix in (".KS", ".KQ"):
-            symbol = query + suffix
-            try:
-                meta = fetch_chart_meta(symbol)
-            except requests.RequestException:
-                meta = None
-            if meta and meta.get("regularMarketPrice") is not None:
-                candidates.append(
-                    {
-                        "symbol": symbol,
-                        "name": meta.get("longName") or meta.get("shortName") or symbol,
-                        "exchange": meta.get("fullExchangeName") or "KRX",
-                        "type": "ETF",
-                        "market": "국내",
-                    }
-                )
+    candidates = list(search_krx_etfs(query))
+    existing_symbols = {c["symbol"] for c in candidates}
 
     try:
         search_results = yahoo_search(query)
@@ -123,7 +247,6 @@ def resolve_candidates(query):
 
     etf_first = [c for c in search_results if c["type"] == "ETF"]
     others = [c for c in search_results if c["type"] != "ETF"]
-    existing_symbols = {c["symbol"] for c in candidates}
     for c in etf_first + others:
         if c["symbol"] not in existing_symbols:
             candidates.append(c)
@@ -166,6 +289,11 @@ def fetch_fund_detail(symbol):
 
 
 def fetch_quote(symbol):
+    if re.fullmatch(r"\d{6}", symbol):
+        return fetch_domestic_quote(symbol)
+    if symbol.endswith((".KS", ".KQ")):
+        return fetch_domestic_quote(symbol[:-3])
+
     meta = fetch_chart_meta(symbol)
     if not meta or meta.get("regularMarketPrice") is None:
         return {"symbol": symbol, "hasData": False}
