@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import statistics
 import threading
 import time
 from datetime import datetime, timedelta
@@ -204,7 +205,54 @@ def fetch_naver_coinfo(code):
     m = re.search(r"유형</th>\s*<td><span[^>]*>([^<]+)</span></td>", text)
     if m:
         result["category"] = m.group(1).strip()
+    m = re.search(r"기초지수</th>\s*<td><span[^>]*>([^<]+)</span></td>", text)
+    if m:
+        result["benchmarkIndex"] = m.group(1).strip()
     return result
+
+
+def compute_annualized_volatility(closes):
+    """Annualized volatility (%) from a list of daily close prices, using
+    the standard deviation of daily returns scaled by sqrt(252)."""
+    closes = [c for c in closes if c is not None]
+    if len(closes) < 2:
+        return None
+    returns = []
+    for prev, curr in zip(closes, closes[1:]):
+        if prev:
+            returns.append((curr - prev) / prev)
+    if len(returns) < 2:
+        return None
+    return statistics.stdev(returns) * (252 ** 0.5) * 100
+
+
+def fetch_domestic_volatility_3y(code):
+    end = datetime.now().strftime("%Y%m%d")
+    start = (datetime.now() - timedelta(days=3 * 365 + 14)).strftime("%Y%m%d")
+    url = f"https://api.stock.naver.com/chart/domestic/item/{code}/day"
+    try:
+        r = requests.get(url, params={"startDateTime": start, "endDateTime": end}, headers=HEADERS, timeout=10)
+        r.raise_for_status()
+        rows = r.json()
+    except (requests.RequestException, ValueError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    return compute_annualized_volatility([row.get("closePrice") for row in rows])
+
+
+def fetch_overseas_volatility_3y(symbol):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    try:
+        r = requests.get(url, params={"range": "3y", "interval": "1d"}, headers=HEADERS, timeout=10)
+        r.raise_for_status()
+        result = r.json().get("chart", {}).get("result")
+    except requests.RequestException:
+        return None
+    if not result:
+        return None
+    quotes = result[0].get("indicators", {}).get("quote") or [{}]
+    return compute_annualized_volatility(quotes[0].get("close", []))
 
 
 def fetch_60d_averages(code):
@@ -260,6 +308,7 @@ def fetch_domestic_quote(code):
 
     coinfo = fetch_naver_coinfo(code)
     averages_60d = fetch_60d_averages(code)
+    volatility_3y = fetch_domestic_volatility_3y(code)
 
     total_map = {i["code"]: i.get("value") for i in detail.get("totalInfos", []) if "code" in i}
     key_ind = detail.get("etfKeyIndicator") or {}
@@ -295,6 +344,8 @@ def fetch_domestic_quote(code):
         "inceptionDate": coinfo.get("inceptionDate"),
         "avgVolume60d": averages_60d.get("avgVolume60d"),
         "avgTradingValue60d": averages_60d.get("avgTradingValue60d"),
+        "benchmarkIndex": coinfo.get("benchmarkIndex"),
+        "volatility3y": volatility_3y,
         "hasData": price is not None,
         "updatedAt": datetime.now().isoformat(),
     }
@@ -417,6 +468,10 @@ def fetch_quote(symbol):
         "exchange": meta.get("fullExchangeName") or meta.get("exchangeName"),
         "yield": raw(summary_detail, "yield"),
         "inceptionDate": raw(key_stats, "fundInceptionDate"),
+        "avgVolume60d": None,
+        "avgTradingValue60d": None,
+        "benchmarkIndex": None,
+        "volatility3y": fetch_overseas_volatility_3y(symbol),
         "hasData": True,
         "updatedAt": datetime.now().isoformat(),
     }

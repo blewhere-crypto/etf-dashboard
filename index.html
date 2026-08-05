@@ -374,6 +374,8 @@ function renderDetail(d) {
         <div><div class="stat-label">설정(상장)일</div><div class="stat-value">${fmtDate(d.inceptionDate)}</div></div>
         <div><div class="stat-label">60일 평균 거래량</div><div class="stat-value">${d.avgVolume60d ? fmtCompact(d.avgVolume60d) : '-'}</div></div>
         <div><div class="stat-label">60일 평균 거래대금</div><div class="stat-value">${d.avgTradingValue60d ? fmtAssets(d.avgTradingValue60d, d.currency) : '-'}</div></div>
+        <div><div class="stat-label">기초지수(BM)</div><div class="stat-value">${d.benchmarkIndex || '-'}</div></div>
+        <div><div class="stat-label">최근 3년 변동성</div><div class="stat-value">${d.volatility3y != null ? d.volatility3y.toFixed(2) + '%' : '-'}</div></div>
       </div>
       <div class="updated-at">조회 시각: ${new Date(d.updatedAt).toLocaleString('ko-KR')}</div>
     </div>
