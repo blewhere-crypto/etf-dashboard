@@ -69,7 +69,7 @@ def write_saved(items):
 
 
 def market_of(symbol):
-    return "국내" if re.fullmatch(r"\d{6}", symbol) or symbol.endswith((".KS", ".KQ")) else "해외"
+    return "국내" if resolve_krx_code(symbol) else "해외"
 
 
 def num(value):
@@ -136,7 +136,8 @@ def search_krx_etfs(query):
     exact, prefix, contains = [], [], []
     for it in items:
         code = it.get("itemcode", "")
-        name = (it.get("itemname") or "")
+        code_lower = code.lower()
+        name = it.get("itemname") or ""
         name_lower = name.lower()
         candidate = {
             "symbol": code,
@@ -145,13 +146,34 @@ def search_krx_etfs(query):
             "type": "ETF",
             "market": "국내",
         }
-        if query == code or query == name_lower:
+        if query == code_lower or query == name_lower:
             exact.append(candidate)
-        elif code.startswith(query) or name_lower.startswith(query):
+        elif code_lower.startswith(query) or name_lower.startswith(query):
             prefix.append(candidate)
-        elif query in name_lower:
+        elif query in name_lower or query in code_lower:
             contains.append(candidate)
     return (exact + prefix + contains)[:8]
+
+
+def resolve_krx_code(symbol):
+    """Return the canonical (correctly-cased) KRX item code for `symbol` if
+    it refers to a KRX-listed ETF, else None. Handles plain 6-digit codes
+    (the common case) as well as the ~25% of KRX ETF codes that mix in a
+    letter (e.g. "0223R0"), matched case-insensitively."""
+    bare = symbol[:-3] if symbol.endswith((".KS", ".KQ")) else symbol
+    if re.fullmatch(r"\d{6}", bare):
+        return bare
+    if not (len(bare) == 6 and bare.isalnum()):
+        return None
+    try:
+        items = fetch_krx_etf_list()
+    except requests.RequestException:
+        return None
+    upper = bare.upper()
+    for it in items:
+        if it.get("itemcode", "").upper() == upper:
+            return it["itemcode"]
+    return None
 
 
 def fetch_domestic_quote(code):
@@ -289,10 +311,9 @@ def fetch_fund_detail(symbol):
 
 
 def fetch_quote(symbol):
-    if re.fullmatch(r"\d{6}", symbol):
-        return fetch_domestic_quote(symbol)
-    if symbol.endswith((".KS", ".KQ")):
-        return fetch_domestic_quote(symbol[:-3])
+    krx_code = resolve_krx_code(symbol)
+    if krx_code:
+        return fetch_domestic_quote(krx_code)
 
     meta = fetch_chart_meta(symbol)
     if not meta or meta.get("regularMarketPrice") is None:
