@@ -279,21 +279,86 @@ def fetch_domestic_volatility_3y(code):
 
 
 # Common ETF benchmark index names -> Naver's domestic index chart code.
-# Naver doesn't expose a name->code search for indices, so this covers the
-# handful of indices most KRX ETFs actually track; anything unmapped just
-# comes back as no benchmark-volatility figure (rather than a wrong one).
+# Naver doesn't expose a name->code search for indices, so this only covers
+# the broad-market indices Naver actually has a chart feed for. The many
+# custom/thematic indices Korean ETFs track (KRX 반도체, FnGuide/WISE/iSelect
+# sector indices, etc.) are calculated by private index providers with no
+# free public historical series we could find — those stay unmapped and the
+# UI shows "-" rather than guessing.
 DOMESTIC_INDEX_CODES = {
     "코스피 200": "KPI200",
     "코스피200": "KPI200",
+    "코스피 100": "KPI100",
+    "코스피100": "KPI100",
     "코스피": "KOSPI",
     "코스닥": "KOSDAQ",
 }
 
+# Benchmark name -> Yahoo Finance index ticker, for the well-known global
+# indices some domestic ETFs track (e.g. "KODEX 미국S&P500" -> S&P 500).
+OVERSEAS_INDEX_TICKERS = {
+    "S&P 500": "^GSPC",
+    "S&P500": "^GSPC",
+    "나스닥 100": "^NDX",
+    "나스닥100": "^NDX",
+    "NASDAQ 100": "^NDX",
+    "나스닥종합": "^IXIC",
+    "나스닥 종합": "^IXIC",
+    "다우존스": "^DJI",
+    "다우존스산업평균": "^DJI",
+    "다우존스 산업평균": "^DJI",
+    "러셀 2000": "^RUT",
+    "러셀2000": "^RUT",
+    "필라델피아 반도체": "^SOX",
+    "필라델피아반도체": "^SOX",
+    "니케이 225": "^N225",
+    "니케이225": "^N225",
+    "항셍": "^HSI",
+    "항셍테크": "^HSTECH",
+    "유로스톡스 50": "^STOXX50E",
+    "유로스톡스50": "^STOXX50E",
+    "독일DAX": "^GDAXI",
+    "DAX": "^GDAXI",
+    "영국FTSE100": "^FTSE",
+    "FTSE100": "^FTSE",
+}
+
+
+def normalize_benchmark_name(name):
+    """Strip parenthetical qualifiers ("(Price Return)", "(TR)") and common
+    Korean/English suffix words so lookup keys match regardless of how the
+    fund's disclosure page phrases the benchmark name (e.g. "S&P 500 Total
+    Return Index" vs plain "S&P 500")."""
+    if not name:
+        return ""
+    name = re.sub(r"\([^)]*\)", "", name)
+    for suffix in ("지수", "Total Return", "Price Return", "Net Total Return", "Index", "TR", "PR", "NTR"):
+        name = re.sub(re.escape(suffix), "", name, flags=re.IGNORECASE)
+    return name.strip()
+
+
+def _compact(text):
+    return re.sub(r"[\s\-]", "", text)
+
 
 def resolve_domestic_index_code(benchmark_name):
-    if not benchmark_name:
+    normalized = _compact(normalize_benchmark_name(benchmark_name))
+    if not normalized:
         return None
-    return DOMESTIC_INDEX_CODES.get(benchmark_name.strip())
+    for key in sorted(DOMESTIC_INDEX_CODES, key=len, reverse=True):
+        if _compact(key) in normalized:
+            return DOMESTIC_INDEX_CODES[key]
+    return None
+
+
+def resolve_overseas_index_ticker(benchmark_name):
+    normalized = _compact(normalize_benchmark_name(benchmark_name)).upper()
+    if not normalized:
+        return None
+    for key in sorted(OVERSEAS_INDEX_TICKERS, key=len, reverse=True):
+        if _compact(key).upper() in normalized:
+            return OVERSEAS_INDEX_TICKERS[key]
+    return None
 
 
 def fetch_domestic_index_volatility_3y(index_code):
@@ -373,8 +438,13 @@ def fetch_domestic_quote(code):
     coinfo = fetch_naver_coinfo(code)
     averages_60d = fetch_60d_averages(code)
     volatility, volatility_days = fetch_domestic_volatility_3y(code)
+
     benchmark_index_code = resolve_domestic_index_code(coinfo.get("benchmarkIndex"))
-    benchmark_volatility, benchmark_volatility_days = fetch_domestic_index_volatility_3y(benchmark_index_code)
+    if benchmark_index_code:
+        benchmark_volatility, benchmark_volatility_days = fetch_domestic_index_volatility_3y(benchmark_index_code)
+    else:
+        overseas_index_ticker = resolve_overseas_index_ticker(coinfo.get("benchmarkIndex"))
+        benchmark_volatility, benchmark_volatility_days = fetch_overseas_volatility_3y(overseas_index_ticker) if overseas_index_ticker else (None, None)
 
     total_map = {i["code"]: i.get("value") for i in detail.get("totalInfos", []) if "code" in i}
     key_ind = detail.get("etfKeyIndicator") or {}
