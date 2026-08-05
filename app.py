@@ -14,6 +14,8 @@ app = Flask(__name__, static_folder=".", static_url_path="")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 SAVED_PATH = os.path.join(DATA_DIR, "saved_etfs.json")
+HISTORY_PATH = os.path.join(DATA_DIR, "search_history.json")
+HISTORY_LIMIT = 30
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
@@ -66,6 +68,19 @@ def load_saved():
 def write_saved(items):
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(SAVED_PATH, "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False, indent=2)
+
+
+def load_history():
+    if not os.path.exists(HISTORY_PATH):
+        return []
+    with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_history(items):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(HISTORY_PATH, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
 
 
@@ -127,8 +142,8 @@ def fetch_krx_etf_list():
 
 
 def search_krx_etfs(query):
-    query = query.strip().lower()
-    if not query:
+    query_norm = _compact(query.strip().lower())
+    if not query_norm:
         return []
     try:
         items = fetch_krx_etf_list()
@@ -137,9 +152,9 @@ def search_krx_etfs(query):
     exact, prefix, contains = [], [], []
     for it in items:
         code = it.get("itemcode", "")
-        code_lower = code.lower()
+        code_norm = _compact(code.lower())
         name = it.get("itemname") or ""
-        name_lower = name.lower()
+        name_norm = _compact(name.lower())
         candidate = {
             "symbol": code,
             "name": name,
@@ -147,11 +162,11 @@ def search_krx_etfs(query):
             "type": "ETF",
             "market": "국내",
         }
-        if query == code_lower or query == name_lower:
+        if query_norm == code_norm or query_norm == name_norm:
             exact.append(candidate)
-        elif code_lower.startswith(query) or name_lower.startswith(query):
+        elif code_norm.startswith(query_norm) or name_norm.startswith(query_norm):
             prefix.append(candidate)
-        elif query in name_lower or query in code_lower:
+        elif query_norm in name_norm or query_norm in code_norm:
             contains.append(candidate)
     return (exact + prefix + contains)[:8]
 
@@ -265,7 +280,7 @@ def compute_risk_stats(dates, closes):
     if len(returns) < 2:
         return None, None, None
     volatility = statistics.stdev(returns) * (252 ** 0.5) * 100
-    var975 = historical_var(returns, 0.975)
+    var975 = historical_var(returns, 0.975) * (250 ** 0.5)
     days_covered = (points[-1][0] - points[0][0]).days
     return volatility, var975, days_covered
 
@@ -701,6 +716,44 @@ def api_saved_add():
 def api_saved_remove(symbol):
     items = [i for i in load_saved() if i["symbol"] != symbol]
     write_saved(items)
+    return jsonify(items)
+
+
+@app.route("/api/history", methods=["GET"])
+def api_history_list():
+    return jsonify(load_history())
+
+
+@app.route("/api/history", methods=["POST"])
+def api_history_add():
+    body = request.get_json(force=True, silent=True) or {}
+    symbol = body.get("symbol")
+    if not symbol:
+        return jsonify({"error": "symbol이 필요합니다."}), 400
+    items = [i for i in load_history() if i["symbol"] != symbol]
+    items.insert(
+        0,
+        {
+            "symbol": symbol,
+            "name": body.get("name", symbol),
+            "market": body.get("market", market_of(symbol)),
+            "searchedAt": datetime.now().isoformat(),
+        },
+    )
+    write_history(items[:HISTORY_LIMIT])
+    return jsonify(items[:HISTORY_LIMIT])
+
+
+@app.route("/api/history", methods=["DELETE"])
+def api_history_clear():
+    write_history([])
+    return jsonify([])
+
+
+@app.route("/api/history/<path:symbol>", methods=["DELETE"])
+def api_history_remove(symbol):
+    items = [i for i in load_history() if i["symbol"] != symbol]
+    write_history(items)
     return jsonify(items)
 
 

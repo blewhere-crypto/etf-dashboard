@@ -188,7 +188,19 @@
   }
   .msg.loading { background: var(--accent-soft); color: var(--accent); }
 
+  section.saved-section { margin-bottom: 28px; }
   section.saved-section h2 { font-size: 15px; color: var(--text-muted); margin: 0 0 12px; }
+  .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .section-head h2 { margin: 0; }
+  .text-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 12px;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+  .text-btn:hover { color: var(--accent); }
   .saved-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
   .saved-card {
     position: relative;
@@ -231,6 +243,14 @@
     <h2>저장한 ETF</h2>
     <div id="savedArea" class="saved-grid"></div>
   </section>
+
+  <section class="saved-section">
+    <div class="section-head">
+      <h2>최근 검색</h2>
+      <button id="clearHistoryBtn" class="text-btn">전체 삭제</button>
+    </div>
+    <div id="historyArea" class="saved-grid"></div>
+  </section>
 </div>
 
 <script>
@@ -240,10 +260,13 @@ const messageArea = $('#messageArea');
 const candidatesArea = $('#candidatesArea');
 const detailArea = $('#detailArea');
 const savedArea = $('#savedArea');
+const historyArea = $('#historyArea');
+const clearHistoryBtn = $('#clearHistoryBtn');
 const searchInput = $('#searchInput');
 const searchBtn = $('#searchBtn');
 
 let savedList = [];
+let historyList = [];
 
 function fmtNum(n, digits = 2) {
   if (n === null || n === undefined || Number.isNaN(n)) return '-';
@@ -335,8 +358,22 @@ async function loadDetail(symbol) {
     const d = await api('/api/quote/' + encodeURIComponent(symbol));
     clearMessage();
     renderDetail(d);
+    if (d.hasData) recordHistory(d);
   } catch (e) {
     showMessage(e.message, 'error');
+  }
+}
+
+async function recordHistory(d) {
+  try {
+    historyList = await api('/api/history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: d.symbol, name: d.name, market: d.market })
+    });
+    renderHistory();
+  } catch {
+    // history is best-effort; a failure here shouldn't block viewing the quote
   }
 }
 
@@ -377,8 +414,8 @@ function renderDetail(d) {
         <div><div class="stat-label">기초지수(BM)</div><div class="stat-value">${d.benchmarkIndex || '-'}</div></div>
         <div><div class="stat-label">변동성 (${d.volatilityPeriod || '기간 미상'})</div><div class="stat-value">${d.volatility != null ? d.volatility.toFixed(2) + '%' : '-'}</div></div>
         <div><div class="stat-label">기초지수 변동성 (${d.benchmarkVolatilityPeriod || '기간 미상'})</div><div class="stat-value">${d.benchmarkVolatility != null ? d.benchmarkVolatility.toFixed(2) + '%' : '-'}</div></div>
-        <div><div class="stat-label">VaR 97.5% (${d.var975Period || '기간 미상'})</div><div class="stat-value">${d.var975 != null ? '-' + d.var975.toFixed(2) + '%' : '-'}</div></div>
-        <div><div class="stat-label">기초지수 VaR 97.5% (${d.benchmarkVar975Period || '기간 미상'})</div><div class="stat-value">${d.benchmarkVar975 != null ? '-' + d.benchmarkVar975.toFixed(2) + '%' : '-'}</div></div>
+        <div><div class="stat-label">VaR 97.5% (${d.var975Period || '기간 미상'})</div><div class="stat-value">${d.var975 != null ? d.var975.toFixed(2) + '%' : '-'}</div></div>
+        <div><div class="stat-label">기초지수 VaR 97.5% (${d.benchmarkVar975Period || '기간 미상'})</div><div class="stat-value">${d.benchmarkVar975 != null ? d.benchmarkVar975.toFixed(2) + '%' : '-'}</div></div>
       </div>
       <div class="updated-at">조회 시각: ${new Date(d.updatedAt).toLocaleString('ko-KR')}</div>
     </div>
@@ -443,6 +480,48 @@ async function initSaved() {
   }
 }
 
+function renderHistory() {
+  if (historyList.length === 0) {
+    historyArea.innerHTML = '<p class="empty">아직 검색 이력이 없습니다.</p>';
+    return;
+  }
+  historyArea.innerHTML = historyList.map(h => `
+    <div class="saved-card" data-symbol="${h.symbol}">
+      <button class="remove" data-remove="${h.symbol}" title="삭제">✕</button>
+      <div class="name">${h.name}</div>
+      <div class="sym">${h.symbol} · ${h.market}</div>
+    </div>
+  `).join('');
+  historyArea.querySelectorAll('.saved-card').forEach(el => {
+    el.addEventListener('click', (e) => {
+      if (e.target.dataset.remove) return;
+      loadDetail(el.dataset.symbol);
+    });
+  });
+  historyArea.querySelectorAll('[data-remove]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const symbol = btn.dataset.remove;
+      historyList = await api('/api/history/' + encodeURIComponent(symbol), { method: 'DELETE' });
+      renderHistory();
+    });
+  });
+}
+
+async function initHistory() {
+  try {
+    historyList = await api('/api/history');
+    renderHistory();
+  } catch {
+    historyArea.innerHTML = '<p class="empty">검색 이력을 불러오지 못했습니다.</p>';
+  }
+}
+
+clearHistoryBtn.addEventListener('click', async () => {
+  historyList = await api('/api/history', { method: 'DELETE' });
+  renderHistory();
+});
+
 searchBtn.addEventListener('click', doSearch);
 searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
 
@@ -460,6 +539,7 @@ themeToggle.addEventListener('click', () => {
 });
 
 initSaved();
+initHistory();
 </script>
 </body>
 </html>
