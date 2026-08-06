@@ -769,6 +769,69 @@ def api_fund_search():
     return jsonify({"results": results[:30]})
 
 
+def fetch_kofia_nav_history(code, start_date, end_date):
+    """Daily 기준가(NAV) history for one fund over [start_date, end_date]
+    (YYYYMMDD strings), via KOFIA's "기준가격변동추이" service. Computing
+    this for every search result would mean one heavy request per row, so
+    callers should only use this for a single fund the user has opened."""
+    body = f"""<?xml version="1.0" encoding="utf-8"?>
+<message>
+  <proframeHeader>
+    <pfmAppName>FS-DIS2</pfmAppName>
+    <pfmSvcName>DISFundStdPrcStutSO</pfmSvcName>
+    <pfmFnName>select</pfmFnName>
+  </proframeHeader>
+  <systemHeader></systemHeader>
+    <DISCondFuncDTO>
+    <tmpV30>{start_date}</tmpV30>
+    <tmpV31>{end_date}</tmpV31>
+    <tmpV10>0</tmpV10>
+    <tmpV12>{code}</tmpV12>
+</DISCondFuncDTO>
+</message>
+"""
+    r = requests.post(KOFIA_URL, data=body.encode("utf-8"), headers=KOFIA_HEADERS, timeout=30, verify=False)
+    r.raise_for_status()
+    blocks = re.findall(r"<selectMeta>(.*?)</selectMeta>", r.text, re.S)
+
+    dates, closes = [], []
+    for b in blocks:
+        m1 = re.search(r"<tmpV1>([^<]*)</tmpV1>", b)
+        m2 = re.search(r"<tmpV2>([^<]*)</tmpV2>", b)
+        raw_date = m1.group(1).strip() if m1 else None
+        raw_nav = m2.group(1).strip() if m2 else None
+        try:
+            dates.append(datetime.strptime(raw_date, "%Y%m%d").date() if raw_date else None)
+        except ValueError:
+            dates.append(None)
+        try:
+            closes.append(float(raw_nav) if raw_nav else None)
+        except ValueError:
+            closes.append(None)
+    return dates, closes
+
+
+def fetch_kofia_risk_stats(code):
+    end_date = kofia_last_business_day()
+    start_date = (datetime.now() - timedelta(days=3 * 365 + 14)).strftime("%Y%m%d")
+    dates, closes = fetch_kofia_nav_history(code, start_date, end_date)
+    volatility, var975, days_covered = compute_risk_stats(dates, closes)
+    return {
+        "volatility": volatility,
+        "volatilityPeriod": format_period_label(days_covered),
+        "var975": var975,
+        "var975Period": format_period_label(days_covered),
+    }
+
+
+@app.route("/api/fund/risk/<path:code>")
+def api_fund_risk(code):
+    try:
+        return jsonify(fetch_kofia_risk_stats(code))
+    except requests.RequestException as e:
+        return jsonify({"error": f"변동성 계산 중 오류가 발생했습니다: {e}"}), 502
+
+
 @app.route("/")
 def index():
     return send_from_directory(BASE_DIR, "index.html")

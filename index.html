@@ -391,6 +391,7 @@ function renderCandidates(results, kind) {
     el.addEventListener('click', () => {
       if (kind === 'fund') {
         const item = results.find(r => r.symbol === el.dataset.symbol);
+        candidatesArea.innerHTML = '';
         renderFundDetail(item);
         recordHistory(item, 'fund');
       } else {
@@ -427,9 +428,14 @@ async function recordHistory(d, kind = 'etf') {
   }
 }
 
+function scrollToDetail() {
+  detailArea.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 function renderDetail(d) {
   if (!d.hasData) {
     detailArea.innerHTML = `<div class="msg error">"${d.symbol}"에 대한 시세 정보를 찾을 수 없습니다.</div>`;
+    scrollToDetail();
     return;
   }
   const changeClass = d.change > 0 ? 'up' : d.change < 0 ? 'down' : 'flat';
@@ -472,6 +478,7 @@ function renderDetail(d) {
   `;
 
   $('#saveBtn').addEventListener('click', () => toggleSave(d, 'etf'));
+  scrollToDetail();
 }
 
 function renderFundDetail(d) {
@@ -496,12 +503,32 @@ function renderFundDetail(d) {
         <div><div class="stat-label">설정일</div><div class="stat-value">${fmtDate(d.inceptionDate)}</div></div>
         <div><div class="stat-label">표준코드</div><div class="stat-value">${d.symbol}</div></div>
         <div><div class="stat-label">기준일자</div><div class="stat-value">${fmtDate(d.baseDate)}</div></div>
+        <div><div class="stat-label">변동성</div><div class="stat-value" id="fundVolCell">계산 중…</div></div>
+        <div><div class="stat-label">VaR 97.5%</div><div class="stat-value" id="fundVarCell">계산 중…</div></div>
       </div>
       <div class="updated-at">기준가는 하루 지연 공시됩니다 · 기준일자: ${fmtDate(d.baseDate)}</div>
     </div>
   `;
 
   $('#saveBtn').addEventListener('click', () => toggleSave(d, 'fund'));
+  scrollToDetail();
+  loadFundRisk(d.symbol);
+}
+
+async function loadFundRisk(code) {
+  const volCell = $('#fundVolCell');
+  const varCell = $('#fundVarCell');
+  try {
+    const r = await api('/api/fund/risk/' + encodeURIComponent(code));
+    if (!volCell || !varCell || !document.body.contains(volCell)) return; // user navigated away
+    volCell.parentElement.querySelector('.stat-label').textContent = `변동성 (${r.volatilityPeriod || '기간 미상'})`;
+    volCell.textContent = r.volatility != null ? r.volatility.toFixed(2) + '%' : '-';
+    varCell.parentElement.querySelector('.stat-label').textContent = `VaR 97.5% (${r.var975Period || '기간 미상'})`;
+    varCell.textContent = r.var975 != null ? r.var975.toFixed(2) + '%' : '-';
+  } catch {
+    if (volCell && document.body.contains(volCell)) volCell.textContent = '-';
+    if (varCell && document.body.contains(varCell)) varCell.textContent = '-';
+  }
 }
 
 async function toggleSave(d, kind = 'etf') {
