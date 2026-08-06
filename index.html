@@ -378,15 +378,20 @@ async function doSearch() {
 }
 
 function renderCandidates(results, kind) {
-  candidatesArea.innerHTML = results.map(r => `
+  candidatesArea.innerHTML = results.map(r => {
+    const meta = kind === 'fund'
+      ? [r.symbol, r.company, r.inceptionDate ? '설정일 ' + fmtDate(r.inceptionDate) : null].filter(Boolean).join(' · ')
+      : [r.symbol, r.exchange].filter(Boolean).join(' · ');
+    return `
     <div class="candidate" data-symbol="${r.symbol}">
       <div>
         <div>${r.name}</div>
-        <div class="meta">${r.symbol} · ${r.exchange || r.company || ''}</div>
+        <div class="meta">${meta}</div>
       </div>
       <span class="badge">${r.market}</span>
     </div>
-  `).join('');
+  `;
+  }).join('');
   candidatesArea.querySelectorAll('.candidate').forEach(el => {
     el.addEventListener('click', () => {
       if (kind === 'fund') {
