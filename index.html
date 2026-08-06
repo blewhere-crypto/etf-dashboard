@@ -220,6 +220,21 @@
   .saved-card .name { font-size: 13px; font-weight: 600; margin-bottom: 4px; padding-right: 16px; }
   .saved-card .sym { font-size: 12px; color: var(--text-muted); }
   .empty { font-size: 13px; color: var(--text-muted); }
+
+  .tab-bar { display: flex; gap: 6px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+  .tab-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 14px;
+    font-weight: 600;
+    padding: 10px 16px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-btn:hover:not(.active) { color: var(--text); }
 </style>
 </head>
 <body>
@@ -229,18 +244,23 @@
     <button class="theme-btn" id="themeToggle" title="다크모드 전환">🌙</button>
   </header>
 
+  <div class="tab-bar">
+    <button class="tab-btn active" id="tabEtf" data-kind="etf">ETF</button>
+    <button class="tab-btn" id="tabFund" data-kind="fund">공모펀드</button>
+  </div>
+
   <div class="search-box">
     <input id="searchInput" type="text" placeholder="종목명 또는 코드/티커 입력 (예: KODEX 200, 069500, SPY)" autocomplete="off" />
     <button id="searchBtn">검색</button>
   </div>
-  <p class="hint">국내 ETF는 6자리 코드(예: 069500), 해외 ETF는 티커(예: SPY, QQQ)로도 검색할 수 있어요.</p>
+  <p class="hint" id="searchHint">국내 ETF는 6자리 코드(예: 069500), 해외 ETF는 티커(예: SPY, QQQ)로도 검색할 수 있어요.</p>
 
   <div id="messageArea"></div>
   <div id="candidatesArea" class="candidates"></div>
   <div id="detailArea"></div>
 
   <section class="saved-section">
-    <h2>저장한 ETF</h2>
+    <h2 id="savedTitle">저장한 ETF</h2>
     <div id="savedArea" class="saved-grid"></div>
   </section>
 
@@ -264,9 +284,14 @@ const historyArea = $('#historyArea');
 const clearHistoryBtn = $('#clearHistoryBtn');
 const searchInput = $('#searchInput');
 const searchBtn = $('#searchBtn');
+const tabEtf = $('#tabEtf');
+const tabFund = $('#tabFund');
+const searchHint = $('#searchHint');
+const savedTitle = $('#savedTitle');
 
 let savedList = [];
 let historyList = [];
+let currentKind = 'etf';
 
 function fmtNum(n, digits = 2) {
   if (n === null || n === undefined || Number.isNaN(n)) return '-';
@@ -317,17 +342,33 @@ async function doSearch() {
   searchBtn.disabled = true;
   showMessage('검색 중입니다…');
   try {
-    const data = await api('/api/search?q=' + encodeURIComponent(q));
-    clearMessage();
-    const results = data.results || [];
-    if (results.length === 0) {
-      showMessage('검색 결과가 없습니다. 종목명이나 코드를 다시 확인해주세요.', 'error');
-      return;
-    }
-    if (results.length === 1) {
-      loadDetail(results[0].symbol);
+    if (currentKind === 'etf') {
+      const data = await api('/api/search?q=' + encodeURIComponent(q));
+      clearMessage();
+      const results = data.results || [];
+      if (results.length === 0) {
+        showMessage('검색 결과가 없습니다. 종목명이나 코드를 다시 확인해주세요.', 'error');
+        return;
+      }
+      if (results.length === 1) {
+        loadDetail(results[0].symbol);
+      } else {
+        renderCandidates(results, 'etf');
+      }
     } else {
-      renderCandidates(results);
+      const data = await api('/api/fund/search?q=' + encodeURIComponent(q));
+      clearMessage();
+      const results = (data.results || []).map(r => ({ ...r, symbol: r.code }));
+      if (results.length === 0) {
+        showMessage('검색 결과가 없습니다. 펀드명을 다시 확인해주세요.', 'error');
+        return;
+      }
+      if (results.length === 1) {
+        renderFundDetail(results[0]);
+        recordHistory(results[0], 'fund');
+      } else {
+        renderCandidates(results, 'fund');
+      }
     }
   } catch (e) {
     showMessage(e.message, 'error');
@@ -336,18 +377,26 @@ async function doSearch() {
   }
 }
 
-function renderCandidates(results) {
+function renderCandidates(results, kind) {
   candidatesArea.innerHTML = results.map(r => `
     <div class="candidate" data-symbol="${r.symbol}">
       <div>
         <div>${r.name}</div>
-        <div class="meta">${r.symbol} · ${r.exchange || ''}</div>
+        <div class="meta">${r.symbol} · ${r.exchange || r.company || ''}</div>
       </div>
       <span class="badge">${r.market}</span>
     </div>
   `).join('');
   candidatesArea.querySelectorAll('.candidate').forEach(el => {
-    el.addEventListener('click', () => loadDetail(el.dataset.symbol));
+    el.addEventListener('click', () => {
+      if (kind === 'fund') {
+        const item = results.find(r => r.symbol === el.dataset.symbol);
+        renderFundDetail(item);
+        recordHistory(item, 'fund');
+      } else {
+        loadDetail(el.dataset.symbol);
+      }
+    });
   });
 }
 
@@ -358,18 +407,19 @@ async function loadDetail(symbol) {
     const d = await api('/api/quote/' + encodeURIComponent(symbol));
     clearMessage();
     renderDetail(d);
-    if (d.hasData) recordHistory(d);
+    if (d.hasData) recordHistory(d, 'etf');
   } catch (e) {
     showMessage(e.message, 'error');
   }
 }
 
-async function recordHistory(d) {
+async function recordHistory(d, kind = 'etf') {
   try {
+    const body = kind === 'fund' ? { ...d, kind } : { symbol: d.symbol, name: d.name, market: d.market, kind };
     historyList = await api('/api/history', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol: d.symbol, name: d.name, market: d.market })
+      body: JSON.stringify(body)
     });
     renderHistory();
   } catch {
@@ -421,22 +471,53 @@ function renderDetail(d) {
     </div>
   `;
 
-  $('#saveBtn').addEventListener('click', () => toggleSave(d));
+  $('#saveBtn').addEventListener('click', () => toggleSave(d, 'etf'));
 }
 
-async function toggleSave(d) {
-  const isSaved = savedList.some(s => s.symbol === d.symbol);
+function renderFundDetail(d) {
+  const isSaved = savedList.some(s => s.symbol === d.symbol && (s.kind || 'etf') === 'fund');
+
+  detailArea.innerHTML = `
+    <div class="card">
+      <div class="card-top">
+        <div>
+          <p class="card-title">${d.name}</p>
+          <p class="card-sub">${d.symbol} · 공모펀드 · ${d.company || ''}</p>
+        </div>
+        <button class="save-btn ${isSaved ? 'saved' : ''}" id="saveBtn">${isSaved ? '★ 저장됨' : '☆ 저장'}</button>
+      </div>
+      <div class="price-row">
+        <div class="price">${fmtNum(d.nav)} <span style="font-size:14px;color:var(--text-muted);">원</span></div>
+      </div>
+      <div class="stat-grid">
+        <div><div class="stat-label">운용사</div><div class="stat-value">${d.company || '-'}</div></div>
+        <div><div class="stat-label">펀드유형</div><div class="stat-value">${d.type || '-'}</div></div>
+        <div><div class="stat-label">설정원본</div><div class="stat-value">${d.aum ? fmtAssets(d.aum, 'KRW') : '-'}</div></div>
+        <div><div class="stat-label">설정일</div><div class="stat-value">${fmtDate(d.inceptionDate)}</div></div>
+        <div><div class="stat-label">표준코드</div><div class="stat-value">${d.symbol}</div></div>
+        <div><div class="stat-label">기준일자</div><div class="stat-value">${fmtDate(d.baseDate)}</div></div>
+      </div>
+      <div class="updated-at">기준가는 하루 지연 공시됩니다 · 기준일자: ${fmtDate(d.baseDate)}</div>
+    </div>
+  `;
+
+  $('#saveBtn').addEventListener('click', () => toggleSave(d, 'fund'));
+}
+
+async function toggleSave(d, kind = 'etf') {
+  const isSaved = savedList.some(s => s.symbol === d.symbol && (s.kind || 'etf') === kind);
   try {
     if (isSaved) {
       savedList = await api('/api/saved/' + encodeURIComponent(d.symbol), { method: 'DELETE' });
     } else {
+      const body = kind === 'fund' ? { ...d, kind } : { symbol: d.symbol, name: d.name, market: d.market, kind };
       savedList = await api('/api/saved', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: d.symbol, name: d.name, market: d.market })
+        body: JSON.stringify(body)
       });
     }
-    renderDetail(d);
+    if (kind === 'fund') renderFundDetail(d); else renderDetail(d);
     renderSaved();
   } catch (e) {
     showMessage(e.message, 'error');
@@ -444,11 +525,12 @@ async function toggleSave(d) {
 }
 
 function renderSaved() {
-  if (savedList.length === 0) {
-    savedArea.innerHTML = '<p class="empty">아직 저장한 ETF가 없습니다. 검색 후 ☆ 저장 버튼을 눌러보세요.</p>';
+  const list = savedList.filter(s => (s.kind || 'etf') === currentKind);
+  if (list.length === 0) {
+    savedArea.innerHTML = `<p class="empty">아직 저장한 ${currentKind === 'fund' ? '공모펀드' : 'ETF'}가 없습니다. 검색 후 ☆ 저장 버튼을 눌러보세요.</p>`;
     return;
   }
-  savedArea.innerHTML = savedList.map(s => `
+  savedArea.innerHTML = list.map(s => `
     <div class="saved-card" data-symbol="${s.symbol}">
       <button class="remove" data-remove="${s.symbol}" title="삭제">✕</button>
       <div class="name">${s.name}</div>
@@ -458,7 +540,9 @@ function renderSaved() {
   savedArea.querySelectorAll('.saved-card').forEach(el => {
     el.addEventListener('click', (e) => {
       if (e.target.dataset.remove) return;
-      loadDetail(el.dataset.symbol);
+      const item = list.find(x => x.symbol === el.dataset.symbol);
+      if (item.kind === 'fund') { renderFundDetail(item); recordHistory(item, 'fund'); }
+      else loadDetail(el.dataset.symbol);
     });
   });
   savedArea.querySelectorAll('[data-remove]').forEach(btn => {
@@ -481,11 +565,12 @@ async function initSaved() {
 }
 
 function renderHistory() {
-  if (historyList.length === 0) {
+  const list = historyList.filter(h => (h.kind || 'etf') === currentKind);
+  if (list.length === 0) {
     historyArea.innerHTML = '<p class="empty">아직 검색 이력이 없습니다.</p>';
     return;
   }
-  historyArea.innerHTML = historyList.map(h => `
+  historyArea.innerHTML = list.map(h => `
     <div class="saved-card" data-symbol="${h.symbol}">
       <button class="remove" data-remove="${h.symbol}" title="삭제">✕</button>
       <div class="name">${h.name}</div>
@@ -495,7 +580,9 @@ function renderHistory() {
   historyArea.querySelectorAll('.saved-card').forEach(el => {
     el.addEventListener('click', (e) => {
       if (e.target.dataset.remove) return;
-      loadDetail(el.dataset.symbol);
+      const item = list.find(x => x.symbol === el.dataset.symbol);
+      if (item.kind === 'fund') { renderFundDetail(item); recordHistory(item, 'fund'); }
+      else loadDetail(el.dataset.symbol);
     });
   });
   historyArea.querySelectorAll('[data-remove]').forEach(btn => {
@@ -518,9 +605,34 @@ async function initHistory() {
 }
 
 clearHistoryBtn.addEventListener('click', async () => {
-  historyList = await api('/api/history', { method: 'DELETE' });
+  historyList = await api('/api/history?kind=' + currentKind, { method: 'DELETE' });
   renderHistory();
 });
+
+function switchTab(kind) {
+  if (kind === currentKind) return;
+  currentKind = kind;
+  tabEtf.classList.toggle('active', kind === 'etf');
+  tabFund.classList.toggle('active', kind === 'fund');
+  searchInput.value = '';
+  candidatesArea.innerHTML = '';
+  detailArea.innerHTML = '';
+  clearMessage();
+  if (kind === 'etf') {
+    searchInput.placeholder = '종목명 또는 코드/티커 입력 (예: KODEX 200, 069500, SPY)';
+    searchHint.textContent = '국내 ETF는 6자리 코드(예: 069500), 해외 ETF는 티커(예: SPY, QQQ)로도 검색할 수 있어요.';
+    savedTitle.textContent = '저장한 ETF';
+  } else {
+    searchInput.placeholder = '펀드명을 입력하세요 (예: 미래에셋코스피200인덱스)';
+    searchHint.textContent = '공모펀드는 실시간 시세 대신 하루 지연된 기준가(NAV)로 표시됩니다.';
+    savedTitle.textContent = '저장한 공모펀드';
+  }
+  renderSaved();
+  renderHistory();
+}
+
+tabEtf.addEventListener('click', () => switchTab('etf'));
+tabFund.addEventListener('click', () => switchTab('fund'));
 
 searchBtn.addEventListener('click', doSearch);
 searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });

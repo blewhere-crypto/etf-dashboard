@@ -6,8 +6,15 @@ import threading
 import time
 from datetime import datetime, timedelta
 
+import truststore
+
+truststore.inject_into_ssl()  # trust the OS certificate store (like curl), not just certifi's bundle
+
 import requests
+import urllib3
 from flask import Flask, jsonify, request, send_from_directory
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__, static_folder=".", static_url_path="")
 
@@ -664,6 +671,104 @@ def fetch_quote(symbol):
     }
 
 
+KOFIA_URL = "https://dis.kofia.or.kr/proframeWeb/XMLSERVICES/"
+KOFIA_REFERER = (
+    "https://dis.kofia.or.kr/websquare/index.jsp?w2xPath=/wq/fundann/DISFundStdPrice.xml"
+    "&divisionId=MDIS01004001000000&serviceId=SDIS01004001000"
+)
+KOFIA_HEADERS = {
+    "User-Agent": HEADERS["User-Agent"],
+    "Content-Type": "text/xml; charset=UTF-8",
+    "Referer": KOFIA_REFERER,
+}
+
+
+def kofia_last_business_day():
+    d = datetime.now() - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d.strftime("%Y%m%d")
+
+
+def parse_kofia_date(value):
+    if not value or len(value) != 8:
+        return None
+    return f"{value[:4]}-{value[4:6]}-{value[6:8]}"
+
+
+def fetch_kofia_funds(name_query):
+    """Search public (공모) mutual funds by name via KOFIA's electronic
+    disclosure system (dis.kofia.or.kr). No login required, confirmed by
+    hand via the site's own search form. Its TLS chain isn't recognized by
+    Python's bundled CA list even though OS-level clients (e.g. curl on
+    Windows) trust it fine, so verification is disabled for this one
+    external call — no credentials or sensitive data cross this request,
+    it's a public read-only fund lookup."""
+    body = f"""<?xml version="1.0" encoding="utf-8"?>
+<message>
+  <proframeHeader>
+    <pfmAppName>FS-DIS2</pfmAppName>
+    <pfmSvcName>DISFundStdPriceSO</pfmSvcName>
+    <pfmFnName>select</pfmFnName>
+  </proframeHeader>
+  <systemHeader></systemHeader>
+    <DISCondFuncDTO>
+    <tmpV30>{kofia_last_business_day()}</tmpV30>
+    <tmpV3></tmpV3>
+    <tmpV4></tmpV4>
+    <tmpV7>1</tmpV7>
+    <tmpV5></tmpV5>
+    <tmpV11></tmpV11>
+    <tmpV12>{name_query}</tmpV12>
+    <tmpV50></tmpV50>
+    <tmpV51></tmpV51>
+</DISCondFuncDTO>
+</message>
+"""
+    r = requests.post(KOFIA_URL, data=body.encode("utf-8"), headers=KOFIA_HEADERS, timeout=20, verify=False)
+    r.raise_for_status()
+    blocks = re.findall(r"<selectMeta>(.*?)</selectMeta>", r.text, re.S)
+
+    def field(block, tag):
+        m = re.search(rf"<{tag}>([^<]*)</{tag}>", block)
+        return m.group(1).strip() if m and m.group(1).strip() else None
+
+    results = []
+    for b in blocks:
+        name = field(b, "tmpV2")
+        code = field(b, "tmpV12")
+        if not name or not code:
+            continue
+        aum_mm = field(b, "tmpV5")
+        nav = field(b, "tmpV6")
+        results.append(
+            {
+                "code": code,
+                "name": name,
+                "company": field(b, "tmpV1"),
+                "type": field(b, "tmpV3"),
+                "inceptionDate": parse_kofia_date(field(b, "tmpV4")),
+                "aum": float(aum_mm) * 1_000_000 if aum_mm else None,
+                "nav": float(nav) if nav else None,
+                "baseDate": parse_kofia_date(field(b, "tmpV14")),
+                "market": "공모펀드",
+            }
+        )
+    return results
+
+
+@app.route("/api/fund/search")
+def api_fund_search():
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify({"error": "검색어를 입력해주세요."}), 400
+    try:
+        results = fetch_kofia_funds(q)
+    except requests.RequestException as e:
+        return jsonify({"error": f"검색 중 오류가 발생했습니다: {e}"}), 502
+    return jsonify({"results": results[:30]})
+
+
 @app.route("/")
 def index():
     return send_from_directory(BASE_DIR, "index.html")
@@ -698,16 +803,16 @@ def api_saved_add():
     symbol = body.get("symbol")
     if not symbol:
         return jsonify({"error": "symbol이 필요합니다."}), 400
+    kind = body.get("kind", "etf")
     items = load_saved()
-    if not any(i["symbol"] == symbol for i in items):
-        items.append(
-            {
-                "symbol": symbol,
-                "name": body.get("name", symbol),
-                "market": body.get("market", market_of(symbol)),
-                "addedAt": datetime.now().isoformat(),
-            }
-        )
+    if not any(i["symbol"] == symbol and i.get("kind", "etf") == kind for i in items):
+        entry = dict(body)
+        entry["symbol"] = symbol
+        entry["name"] = body.get("name", symbol)
+        entry["market"] = body.get("market") or (market_of(symbol) if kind == "etf" else "공모펀드")
+        entry["kind"] = kind
+        entry["addedAt"] = datetime.now().isoformat()
+        items.append(entry)
         write_saved(items)
     return jsonify(items)
 
@@ -730,24 +835,28 @@ def api_history_add():
     symbol = body.get("symbol")
     if not symbol:
         return jsonify({"error": "symbol이 필요합니다."}), 400
-    items = [i for i in load_history() if i["symbol"] != symbol]
-    items.insert(
-        0,
-        {
-            "symbol": symbol,
-            "name": body.get("name", symbol),
-            "market": body.get("market", market_of(symbol)),
-            "searchedAt": datetime.now().isoformat(),
-        },
-    )
+    kind = body.get("kind", "etf")
+    items = [i for i in load_history() if not (i["symbol"] == symbol and i.get("kind", "etf") == kind)]
+    entry = dict(body)
+    entry["symbol"] = symbol
+    entry["name"] = body.get("name", symbol)
+    entry["market"] = body.get("market") or (market_of(symbol) if kind == "etf" else "공모펀드")
+    entry["kind"] = kind
+    entry["searchedAt"] = datetime.now().isoformat()
+    items.insert(0, entry)
     write_history(items[:HISTORY_LIMIT])
     return jsonify(items[:HISTORY_LIMIT])
 
 
 @app.route("/api/history", methods=["DELETE"])
 def api_history_clear():
-    write_history([])
-    return jsonify([])
+    kind = request.args.get("kind")
+    if kind:
+        items = [i for i in load_history() if i.get("kind", "etf") != kind]
+    else:
+        items = []
+    write_history(items)
+    return jsonify(items)
 
 
 @app.route("/api/history/<path:symbol>", methods=["DELETE"])
