@@ -293,6 +293,31 @@ let savedList = [];
 let historyList = [];
 let currentKind = 'etf';
 
+const SAVED_STORAGE_KEY = 'etf-dashboard-saved';
+const HISTORY_STORAGE_KEY = 'etf-dashboard-history';
+const HISTORY_LIMIT = 30;
+
+function loadSavedLocal() {
+  try {
+    return JSON.parse(localStorage.getItem(SAVED_STORAGE_KEY) || '[]');
+  } catch {
+    return [];
+  }
+}
+function writeSavedLocal(items) {
+  localStorage.setItem(SAVED_STORAGE_KEY, JSON.stringify(items));
+}
+function loadHistoryLocal() {
+  try {
+    return JSON.parse(localStorage.getItem(HISTORY_STORAGE_KEY) || '[]');
+  } catch {
+    return [];
+  }
+}
+function writeHistoryLocal(items) {
+  localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(items));
+}
+
 function fmtNum(n, digits = 2) {
   if (n === null || n === undefined || Number.isNaN(n)) return '-';
   return Number(n).toLocaleString('ko-KR', { maximumFractionDigits: digits });
@@ -419,18 +444,15 @@ async function loadDetail(symbol) {
   }
 }
 
-async function recordHistory(d, kind = 'etf') {
-  try {
-    const body = kind === 'fund' ? { ...d, kind } : { symbol: d.symbol, name: d.name, market: d.market, kind };
-    historyList = await api('/api/history', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    renderHistory();
-  } catch {
-    // history is best-effort; a failure here shouldn't block viewing the quote
-  }
+function recordHistory(d, kind = 'etf') {
+  const entry = kind === 'fund'
+    ? { ...d, kind, searchedAt: new Date().toISOString() }
+    : { symbol: d.symbol, name: d.name, market: d.market, kind, searchedAt: new Date().toISOString() };
+  historyList = historyList.filter(h => !(h.symbol === d.symbol && (h.kind || 'etf') === kind));
+  historyList.unshift(entry);
+  historyList = historyList.slice(0, HISTORY_LIMIT);
+  writeHistoryLocal(historyList);
+  renderHistory();
 }
 
 function scrollToDetail() {
@@ -536,24 +558,19 @@ async function loadFundRisk(code) {
   }
 }
 
-async function toggleSave(d, kind = 'etf') {
+function toggleSave(d, kind = 'etf') {
   const isSaved = savedList.some(s => s.symbol === d.symbol && (s.kind || 'etf') === kind);
-  try {
-    if (isSaved) {
-      savedList = await api('/api/saved/' + encodeURIComponent(d.symbol), { method: 'DELETE' });
-    } else {
-      const body = kind === 'fund' ? { ...d, kind } : { symbol: d.symbol, name: d.name, market: d.market, kind };
-      savedList = await api('/api/saved', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-    }
-    if (kind === 'fund') renderFundDetail(d); else renderDetail(d);
-    renderSaved();
-  } catch (e) {
-    showMessage(e.message, 'error');
+  if (isSaved) {
+    savedList = savedList.filter(s => !(s.symbol === d.symbol && (s.kind || 'etf') === kind));
+  } else {
+    const entry = kind === 'fund'
+      ? { ...d, kind, addedAt: new Date().toISOString() }
+      : { symbol: d.symbol, name: d.name, market: d.market, kind, addedAt: new Date().toISOString() };
+    savedList.push(entry);
   }
+  writeSavedLocal(savedList);
+  if (kind === 'fund') renderFundDetail(d); else renderDetail(d);
+  renderSaved();
 }
 
 function renderSaved() {
@@ -578,22 +595,19 @@ function renderSaved() {
     });
   });
   savedArea.querySelectorAll('[data-remove]').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
+    btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const symbol = btn.dataset.remove;
-      savedList = await api('/api/saved/' + encodeURIComponent(symbol), { method: 'DELETE' });
+      savedList = savedList.filter(s => s.symbol !== symbol);
+      writeSavedLocal(savedList);
       renderSaved();
     });
   });
 }
 
-async function initSaved() {
-  try {
-    savedList = await api('/api/saved');
-    renderSaved();
-  } catch {
-    savedArea.innerHTML = '<p class="empty">저장 목록을 불러오지 못했습니다.</p>';
-  }
+function initSaved() {
+  savedList = loadSavedLocal();
+  renderSaved();
 }
 
 function renderHistory() {
@@ -618,26 +632,24 @@ function renderHistory() {
     });
   });
   historyArea.querySelectorAll('[data-remove]').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
+    btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const symbol = btn.dataset.remove;
-      historyList = await api('/api/history/' + encodeURIComponent(symbol), { method: 'DELETE' });
+      historyList = historyList.filter(h => h.symbol !== symbol);
+      writeHistoryLocal(historyList);
       renderHistory();
     });
   });
 }
 
-async function initHistory() {
-  try {
-    historyList = await api('/api/history');
-    renderHistory();
-  } catch {
-    historyArea.innerHTML = '<p class="empty">검색 이력을 불러오지 못했습니다.</p>';
-  }
+function initHistory() {
+  historyList = loadHistoryLocal();
+  renderHistory();
 }
 
-clearHistoryBtn.addEventListener('click', async () => {
-  historyList = await api('/api/history?kind=' + currentKind, { method: 'DELETE' });
+clearHistoryBtn.addEventListener('click', () => {
+  historyList = historyList.filter(h => (h.kind || 'etf') !== currentKind);
+  writeHistoryLocal(historyList);
   renderHistory();
 });
 

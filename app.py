@@ -19,10 +19,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 app = Flask(__name__, static_folder=".", static_url_path="")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-SAVED_PATH = os.path.join(DATA_DIR, "saved_etfs.json")
-HISTORY_PATH = os.path.join(DATA_DIR, "search_history.json")
-HISTORY_LIMIT = 30
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
@@ -63,32 +59,6 @@ def raw(container, key):
     if isinstance(value, dict):
         return value.get("raw")
     return value
-
-
-def load_saved():
-    if not os.path.exists(SAVED_PATH):
-        return []
-    with open(SAVED_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def write_saved(items):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(SAVED_PATH, "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False, indent=2)
-
-
-def load_history():
-    if not os.path.exists(HISTORY_PATH):
-        return []
-    with open(HISTORY_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def write_history(items):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(HISTORY_PATH, "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False, indent=2)
 
 
 def market_of(symbol):
@@ -853,80 +823,6 @@ def api_quote(symbol):
     except Exception as e:
         return jsonify({"error": f"조회 중 오류가 발생했습니다: {e}"}), 502
     return jsonify(data)
-
-
-@app.route("/api/saved", methods=["GET"])
-def api_saved_list():
-    return jsonify(load_saved())
-
-
-@app.route("/api/saved", methods=["POST"])
-def api_saved_add():
-    body = request.get_json(force=True, silent=True) or {}
-    symbol = body.get("symbol")
-    if not symbol:
-        return jsonify({"error": "symbol이 필요합니다."}), 400
-    kind = body.get("kind", "etf")
-    items = load_saved()
-    if not any(i["symbol"] == symbol and i.get("kind", "etf") == kind for i in items):
-        entry = dict(body)
-        entry["symbol"] = symbol
-        entry["name"] = body.get("name", symbol)
-        entry["market"] = body.get("market") or (market_of(symbol) if kind == "etf" else "공모펀드")
-        entry["kind"] = kind
-        entry["addedAt"] = datetime.now().isoformat()
-        items.append(entry)
-        write_saved(items)
-    return jsonify(items)
-
-
-@app.route("/api/saved/<path:symbol>", methods=["DELETE"])
-def api_saved_remove(symbol):
-    items = [i for i in load_saved() if i["symbol"] != symbol]
-    write_saved(items)
-    return jsonify(items)
-
-
-@app.route("/api/history", methods=["GET"])
-def api_history_list():
-    return jsonify(load_history())
-
-
-@app.route("/api/history", methods=["POST"])
-def api_history_add():
-    body = request.get_json(force=True, silent=True) or {}
-    symbol = body.get("symbol")
-    if not symbol:
-        return jsonify({"error": "symbol이 필요합니다."}), 400
-    kind = body.get("kind", "etf")
-    items = [i for i in load_history() if not (i["symbol"] == symbol and i.get("kind", "etf") == kind)]
-    entry = dict(body)
-    entry["symbol"] = symbol
-    entry["name"] = body.get("name", symbol)
-    entry["market"] = body.get("market") or (market_of(symbol) if kind == "etf" else "공모펀드")
-    entry["kind"] = kind
-    entry["searchedAt"] = datetime.now().isoformat()
-    items.insert(0, entry)
-    write_history(items[:HISTORY_LIMIT])
-    return jsonify(items[:HISTORY_LIMIT])
-
-
-@app.route("/api/history", methods=["DELETE"])
-def api_history_clear():
-    kind = request.args.get("kind")
-    if kind:
-        items = [i for i in load_history() if i.get("kind", "etf") != kind]
-    else:
-        items = []
-    write_history(items)
-    return jsonify(items)
-
-
-@app.route("/api/history/<path:symbol>", methods=["DELETE"])
-def api_history_remove(symbol):
-    items = [i for i in load_history() if i["symbol"] != symbol]
-    write_history(items)
-    return jsonify(items)
 
 
 if __name__ == "__main__":
