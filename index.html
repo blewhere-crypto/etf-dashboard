@@ -198,6 +198,7 @@
   .market-tag { font-weight: 600; }
   .market-tag.market-kospi { color: var(--up); }
   .market-tag.market-kosdaq { color: var(--down); }
+  .market-tag.market-other { color: var(--accent); }
 
   .msg { padding: 14px 16px; border-radius: 10px; font-size: 14px; margin-bottom: 20px; }
   .msg.error { background: #fdeaea; color: #b42318; }
@@ -348,6 +349,11 @@ function fmtCompact(n) {
   if (abs >= 1e8) return (n / 1e8).toFixed(2) + '억';
   if (abs >= 1e4) return (n / 1e4).toFixed(1) + '만';
   return fmtNum(n, 0);
+}
+function marketTagClass(market) {
+  if (market === '코스피') return 'market-kospi';
+  if (market === '코스닥') return 'market-kosdaq';
+  return 'market-other';
 }
 function fmtAssets(n, currency) {
   if (n === null || n === undefined) return '-';
@@ -565,8 +571,8 @@ async function loadHoldings(symbol) {
               <td>${h.name || '-'}</td>
               <td>${h.code || '-'}</td>
               <td>${h.weight != null ? h.weight.toFixed(2) + '%' : '-'}</td>
-              <td>${h.marketCap != null ? fmtCompact(h.marketCap) + '원' : '-'}</td>
-              <td>${h.market ? `<span class="market-tag market-${h.market === '코스피' ? 'kospi' : 'kosdaq'}">${h.market}</span>` : '-'}</td>
+              <td>${h.marketCap != null ? fmtAssets(h.marketCap, h.currency || 'KRW') : '-'}</td>
+              <td>${h.market ? `<span class="market-tag ${marketTagClass(h.market)}">${h.market}</span>` : '-'}</td>
               <td>${h.marketCapRank != null ? h.marketCapRank + '위' : '-'}</td>
             </tr>
           `).join('')}

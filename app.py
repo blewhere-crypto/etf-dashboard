@@ -1254,16 +1254,115 @@ def fetch_market_cap_map():
     return cache["map"] or {}
 
 
+# Some domestic ETFs (e.g. TIGER/KODEX 미국S&P500) hold US-listed stocks
+# directly, disclosed in the PDF using Bloomberg-style codes like
+# "NVDA US Equity". US market-cap ranking works the same way as the KRX one
+# above (background-refreshed, non-blocking), but via Yahoo Finance's
+# screener endpoint instead of Naver's, and scoped to the top ~2,000 US
+# equities by market cap (8 pages of 250) rather than the whole market —
+# realistic ETF holdings (S&P 500 / Nasdaq 100 / sector trackers) don't dip
+# below that, and it keeps the background rebuild cheap.
+_BLOOMBERG_US_EQUITY_RE = re.compile(r"^([A-Z.]{1,6})\s+US\s+Equity$", re.I)
+_YAHOO_EXCHANGE_LABELS = {
+    "NasdaqGS": "나스닥",
+    "NasdaqGM": "나스닥",
+    "NasdaqCM": "나스닥",
+    "NYSE": "뉴욕증권거래소",
+    "NYSEArca": "NYSE Arca",
+    "NYSEAMERICAN": "NYSE American",
+    "BATS": "BATS",
+    "CBOE": "CBOE",
+}
+_US_MARKET_CAP_PAGES = 8
+_us_market_cap_cache = {"map": None, "fetched_at": 0, "building": False}
+_us_market_cap_lock = threading.Lock()
+
+
+def _fetch_us_market_cap_page(session, crumb, offset):
+    body = {
+        "size": 250,
+        "offset": offset,
+        "sortField": "intradaymarketcap",
+        "sortType": "DESC",
+        "quoteType": "EQUITY",
+        "query": {"operator": "AND", "operands": [{"operator": "EQ", "operands": ["region", "us"]}]},
+    }
+    r = session.post(
+        "https://query1.finance.yahoo.com/v1/finance/screener",
+        params={"crumb": crumb},
+        json=body,
+        timeout=15,
+    )
+    r.raise_for_status()
+    results = r.json().get("finance", {}).get("result") or [{}]
+    return results[0].get("quotes") or []
+
+
+def _build_us_market_cap_map():
+    try:
+        session, crumb = get_session_and_crumb()
+        mapping = {}
+        rank = 1
+        for page in range(_US_MARKET_CAP_PAGES):
+            try:
+                quotes = _fetch_us_market_cap_page(session, crumb, offset=page * 250)
+            except requests.RequestException:
+                break
+            if not quotes:
+                break
+            for q in quotes:
+                symbol = q.get("symbol")
+                if not symbol:
+                    continue
+                exchange = q.get("fullExchangeName") or ""
+                mapping[symbol.upper()] = {
+                    "market": _YAHOO_EXCHANGE_LABELS.get(exchange, exchange or None),
+                    "marketCap": q.get("marketCap"),
+                    "marketCapRank": rank,
+                    "currency": "USD",
+                }
+                rank += 1
+        if mapping:
+            _us_market_cap_cache["map"] = mapping
+            _us_market_cap_cache["fetched_at"] = time.time()
+    except requests.RequestException:
+        pass
+    finally:
+        _us_market_cap_cache["building"] = False
+
+
+def fetch_us_market_cap_map():
+    now = time.time()
+    cache = _us_market_cap_cache
+    is_stale = cache["map"] is None or now - cache["fetched_at"] >= _MARKET_CAP_TTL_SECONDS
+    if is_stale and not cache["building"]:
+        with _us_market_cap_lock:
+            if not cache["building"]:
+                cache["building"] = True
+                threading.Thread(target=_build_us_market_cap_map, daemon=True).start()
+    return cache["map"] or {}
+
+
 def enrich_holdings_with_market_cap(holdings):
     try:
-        market_cap_map = fetch_market_cap_map()
+        kr_map = fetch_market_cap_map()
     except requests.RequestException:
-        market_cap_map = {}
+        kr_map = {}
+    try:
+        us_map = fetch_us_market_cap_map()
+    except requests.RequestException:
+        us_map = {}
     for h in holdings:
-        info = market_cap_map.get(h.get("code"))
+        code = h.get("code") or ""
+        info = kr_map.get(code)
+        if not info:
+            m = _BLOOMBERG_US_EQUITY_RE.match(code)
+            if m:
+                info = us_map.get(m.group(1).upper().replace(".", "-"))
         h["market"] = info["market"] if info else None
         h["marketCap"] = info["marketCap"] if info else None
         h["marketCapRank"] = info["marketCapRank"] if info else None
+        h["currency"] = info.get("currency", "KRW") if info else None
     return holdings
 
 
