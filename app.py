@@ -1392,11 +1392,16 @@ def _background_fetch_us_exchanges(tickers):
 
 
 def get_us_exchange_map(tickers):
-    """Non-blocking: returns whatever's already cached for these tickers and
-    kicks off a background fetch (threaded) for the rest — but only for
-    tickers that aren't already being fetched by an earlier, still-running
-    background call, so repeated requests for the same (uncached) holdings
-    don't keep stacking up new thread pools on top of each other."""
+    """Non-blocking: returns whatever's already cached for ALL of `tickers`
+    (no limit on this side — once a ticker's cached, every holding using it
+    benefits, however many there are), and kicks off a background fetch for
+    up to _US_EXCHANGE_FALLBACK_LIMIT of the still-uncached ones. That cap
+    throttles how many *new* lookups start per call (keeping each
+    background thread pool small on constrained hosting) — it doesn't limit
+    which holdings can ever end up enriched; a fund with hundreds of US
+    names just fills in gradually across repeated views instead of all at
+    once. Tickers already being fetched by an earlier, still-running call
+    are skipped so repeat requests don't stack up duplicate thread pools."""
     now = time.time()
     with _us_exchange_lock:
         cached = {
@@ -1404,7 +1409,8 @@ def get_us_exchange_map(tickers):
             for t, v in _us_exchange_cache.items()
             if t in tickers and now - v["fetched_at"] < _US_EXCHANGE_CACHE_TTL
         }
-        to_fetch = [t for t in tickers if t not in cached and t not in _us_exchange_pending]
+        candidates = [t for t in tickers if t not in cached and t not in _us_exchange_pending]
+        to_fetch = candidates[:_US_EXCHANGE_FALLBACK_LIMIT]
         _us_exchange_pending.update(to_fetch)
     if to_fetch:
         threading.Thread(target=_background_fetch_us_exchanges, args=(to_fetch,), daemon=True).start()
@@ -1440,15 +1446,13 @@ def enrich_holdings_with_market_cap(holdings):
         h["currency"] = info.get("currency", "KRW") if info else None
 
     if fallback_tickers:
-        # Cap to the most heavily-weighted holdings needing the fallback —
-        # those are what a user actually looks at, and it keeps the
-        # per-request thread/request count small and predictable regardless
-        # of how many total US names the fund holds (some hold 500+).
-        top_indices = sorted(fallback_indices, key=lambda i: -(holdings[i].get("weight") or 0))[:_US_EXCHANGE_FALLBACK_LIMIT]
-        top_tickers = [fallback_indices[i] for i in top_indices]
-        exchange_map = get_us_exchange_map(top_tickers)
-        for i in top_indices:
-            exchange = exchange_map.get(fallback_indices[i])
+        # holdings are weight-sorted by every source, so fallback_tickers
+        # already lists the most-viewed names first — that ordering is what
+        # get_us_exchange_map uses to decide which uncached tickers to fetch
+        # first when it throttles new lookups (see its docstring).
+        exchange_map = get_us_exchange_map(fallback_tickers)
+        for i, ticker in fallback_indices.items():
+            exchange = exchange_map.get(ticker)
             if exchange:
                 holdings[i]["market"] = _YAHOO_EXCHANGE_LABELS.get(exchange, exchange)
                 holdings[i]["currency"] = "USD"
