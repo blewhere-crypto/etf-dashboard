@@ -1176,10 +1176,14 @@ def fetch_rise_holdings(krx_code):
 
 # Market (KOSPI/KOSDAQ) + market cap + market-cap rank for individual
 # constituent stocks inside ETF holdings, sourced from Naver's mobile stock
-# API (paginated market-cap ranking, 100 rows/page). Fetched in parallel
-# since a full pass is ~25 pages for KOSPI + ~19 for KOSDAQ; cached for an
-# hour since intraday rank churn is negligible for this purpose.
-_market_cap_cache = {"map": None, "fetched_at": 0}
+# API (paginated market-cap ranking, 100 rows/page; ~25 pages for KOSPI +
+# ~19 for KOSDAQ). A full pass is too slow to do inline in a request (it hit
+# gunicorn's worker timeout on Render and 502'd), so it's refreshed in a
+# background thread instead: a request that finds the cache missing/stale
+# kicks off exactly one rebuild and immediately uses whatever's cached (or
+# no enrichment at all, the first time) rather than waiting on it.
+_market_cap_cache = {"map": None, "fetched_at": 0, "building": False}
+_market_cap_lock = threading.Lock()
 _MARKET_CAP_TTL_SECONDS = 3600
 
 
@@ -1188,7 +1192,7 @@ def _fetch_market_value_page(market, page):
         f"https://m.stock.naver.com/api/stocks/marketValue/{market}",
         params={"page": page, "pageSize": 100},
         headers=HEADERS,
-        timeout=10,
+        timeout=8,
     )
     r.raise_for_status()
     return r.json()
@@ -1210,27 +1214,44 @@ def _fetch_market_value_all(market):
     return stocks
 
 
+def _build_market_cap_map():
+    try:
+        mapping = {}
+        for market, label in (("KOSPI", "코스피"), ("KOSDAQ", "코스닥")):
+            try:
+                stocks = _fetch_market_value_all(market)
+            except requests.RequestException:
+                continue
+            for rank, s in enumerate(stocks, start=1):
+                code = s.get("itemCode")
+                if not code:
+                    continue
+                market_value = num(s.get("marketValue"))  # Naver reports this in 억원 (100M-won) units
+                mapping[code] = {
+                    "market": label,
+                    "marketCap": market_value * 1e8 if market_value is not None else None,
+                    "marketCapRank": rank,
+                }
+        if mapping:
+            _market_cap_cache["map"] = mapping
+            _market_cap_cache["fetched_at"] = time.time()
+    finally:
+        _market_cap_cache["building"] = False
+
+
 def fetch_market_cap_map():
+    """Return whatever market-cap map is currently cached (possibly stale,
+    possibly empty on first-ever call) without blocking. If the cache is
+    missing or past its TTL, kick off exactly one background rebuild."""
     now = time.time()
     cache = _market_cap_cache
-    if cache["map"] is not None and now - cache["fetched_at"] < _MARKET_CAP_TTL_SECONDS:
-        return cache["map"]
-    mapping = {}
-    for market, label in (("KOSPI", "코스피"), ("KOSDAQ", "코스닥")):
-        stocks = _fetch_market_value_all(market)
-        for rank, s in enumerate(stocks, start=1):
-            code = s.get("itemCode")
-            if not code:
-                continue
-            market_value = num(s.get("marketValue"))  # Naver reports this in 억원 (100M-won) units
-            mapping[code] = {
-                "market": label,
-                "marketCap": market_value * 1e8 if market_value is not None else None,
-                "marketCapRank": rank,
-            }
-    cache["map"] = mapping
-    cache["fetched_at"] = now
-    return mapping
+    is_stale = cache["map"] is None or now - cache["fetched_at"] >= _MARKET_CAP_TTL_SECONDS
+    if is_stale and not cache["building"]:
+        with _market_cap_lock:
+            if not cache["building"]:
+                cache["building"] = True
+                threading.Thread(target=_build_market_cap_map, daemon=True).start()
+    return cache["map"] or {}
 
 
 def enrich_holdings_with_market_cap(holdings):
