@@ -864,6 +864,93 @@ def api_fund_risk(code):
         return jsonify({"error": f"변동성 계산 중 오류가 발생했습니다: {e}"}), 502
 
 
+# KODEX (Samsung Asset Management) publishes each ETF's full daily holdings
+# (구성종목) on its own site, no login required. This only covers the KODEX
+# brand — other issuers (TIGER/ACE/KBSTAR/SOL/...) would need their own
+# per-site integration, which we haven't built. The site's own terms
+# prohibit unauthorized bulk databasing of its content, so we only fetch a
+# single ETF's holdings on demand (when a user opens that ETF's detail
+# card) rather than mirroring the whole catalog.
+KODEX_HEADERS = {"User-Agent": HEADERS["User-Agent"]}
+_kodex_ticker_map_cache = {"map": None, "fetched_at": 0}
+_KODEX_TICKER_MAP_TTL_SECONDS = 3600
+
+
+def fetch_kodex_ticker_map():
+    now = time.time()
+    cache = _kodex_ticker_map_cache
+    if cache["map"] is not None and now - cache["fetched_at"] < _KODEX_TICKER_MAP_TTL_SECONDS:
+        return cache["map"]
+    mapping = {}
+    page = 1
+    while True:
+        r = requests.get(
+            "https://m.samsungfund.com/api/v1/kodex/product.do",
+            params={"srchTerm": "", "ordrSort": "DESC", "ordrColm": "NAV", "pageNo": page},
+            headers=KODEX_HEADERS,
+            timeout=15,
+        )
+        r.raise_for_status()
+        items = r.json()
+        if not items:
+            break
+        for it in items:
+            ticker = it.get("stkTicker")
+            fund_id = it.get("fId")
+            if ticker and fund_id:
+                mapping[ticker] = fund_id
+        if len(items) < 20 or page > 20:  # 20/page; hard cap as a safety net
+            break
+        page += 1
+    cache["map"] = mapping
+    cache["fetched_at"] = now
+    return mapping
+
+
+def fetch_kodex_holdings(krx_code):
+    """Return {"holdings": [...], "asOfDate": "..."} for a KODEX ETF, or
+    None if krx_code isn't a KODEX-branded fund."""
+    try:
+        ticker_map = fetch_kodex_ticker_map()
+    except requests.RequestException:
+        return None
+    fund_id = ticker_map.get(krx_code)
+    if not fund_id:
+        return None
+    r = requests.get(f"https://m.samsungfund.com/api/v1/kodex/product/{fund_id}.do", headers=KODEX_HEADERS, timeout=15)
+    r.raise_for_status()
+    pdf = (r.json() or {}).get("pdf") or {}
+    holdings = []
+    for item in pdf.get("list") or []:
+        weight = item.get("ratio")
+        try:
+            weight = float(weight) if weight not in (None, "") else None
+        except ValueError:
+            weight = None
+        holdings.append(
+            {
+                "code": item.get("itmNo"),
+                "name": item.get("secNm"),
+                "weight": weight,
+            }
+        )
+    return {
+        "holdings": holdings,
+        "asOfDate": parse_kofia_date(pdf.get("gijunYMD")),
+    }
+
+
+@app.route("/api/holdings/<path:symbol>")
+def api_holdings(symbol):
+    try:
+        data = fetch_kodex_holdings(symbol)
+    except requests.RequestException as e:
+        return jsonify({"error": f"구성종목 조회 중 오류가 발생했습니다: {e}"}), 502
+    if data is None:
+        return jsonify({"holdings": None, "message": "KODEX 브랜드 ETF만 구성종목을 지원합니다."})
+    return jsonify(data)
+
+
 @app.route("/")
 def index():
     return send_from_directory(BASE_DIR, "index.html")

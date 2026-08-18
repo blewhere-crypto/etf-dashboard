@@ -180,6 +180,13 @@
   .stat-value { font-size: 14px; font-weight: 600; }
   .updated-at { font-size: 12px; color: var(--text-muted); margin-top: 16px; text-align: right; }
 
+  .holdings-section { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+  .holdings-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .holdings-table th { text-align: left; color: var(--text-muted); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .holdings-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .holdings-table th:last-child, .holdings-table td:last-child { text-align: right; }
+  .holdings-table tbody tr:last-child td { border-bottom: none; }
+
   .msg { padding: 14px 16px; border-radius: 10px; font-size: 14px; margin-bottom: 20px; }
   .msg.error { background: #fdeaea; color: #b42318; }
   :root[data-theme="dark"] .msg.error { background: #3a1a1a; color: #ff8a8a; }
@@ -500,12 +507,47 @@ function renderDetail(d) {
         <div><div class="stat-label">VaR 97.5% (${d.var975Period || '기간 미상'})</div><div class="stat-value">${d.var975 != null ? d.var975.toFixed(2) + '%' : '-'}</div></div>
         <div><div class="stat-label">기초지수 VaR 97.5% (${d.benchmarkVar975Period || '기간 미상'})</div><div class="stat-value">${d.benchmarkVar975 != null ? d.benchmarkVar975.toFixed(2) + '%' : '-'}</div></div>
       </div>
+      <div class="holdings-section" id="holdingsSection">
+        <div class="stat-label" style="margin-bottom:8px;">구성종목</div>
+        <div id="holdingsBody">조회 중…</div>
+      </div>
       <div class="updated-at">조회 시각: ${new Date(d.updatedAt).toLocaleString('ko-KR')}</div>
     </div>
   `;
 
   $('#saveBtn').addEventListener('click', () => toggleSave(d, 'etf'));
   scrollToDetail();
+  loadHoldings(d.symbol);
+}
+
+async function loadHoldings(symbol) {
+  const body = $('#holdingsBody');
+  try {
+    const r = await api('/api/holdings/' + encodeURIComponent(symbol));
+    if (!body || !document.body.contains(body)) return; // user navigated away
+    if (!r.holdings || r.holdings.length === 0) {
+      body.innerHTML = `<p class="empty" style="margin:0;">${r.message || '구성종목 정보를 찾을 수 없습니다.'}</p>`;
+      return;
+    }
+    const asOf = r.asOfDate ? `<div class="updated-at" style="margin-top:6px;">기준일자: ${fmtDate(r.asOfDate)}</div>` : '';
+    body.innerHTML = `
+      <table class="holdings-table">
+        <thead><tr><th>종목명</th><th>코드</th><th>비중</th></tr></thead>
+        <tbody>
+          ${r.holdings.map(h => `
+            <tr>
+              <td>${h.name || '-'}</td>
+              <td>${h.code || '-'}</td>
+              <td>${h.weight != null ? h.weight.toFixed(2) + '%' : '-'}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      ${asOf}
+    `;
+  } catch {
+    if (body && document.body.contains(body)) body.innerHTML = `<p class="empty" style="margin:0;">구성종목 조회 중 오류가 발생했습니다.</p>`;
+  }
 }
 
 function renderFundDetail(d) {
