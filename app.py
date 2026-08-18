@@ -660,6 +660,68 @@ def kofia_last_business_day():
     return d.strftime("%Y%m%d")
 
 
+# KOFIA's fund search filters by a "기준일자" (as-of date), but that day's
+# NAV data isn't always published by the time we'd naively assume (T-1
+# business day) — publication can lag by a few extra days. Rather than
+# hardcode an assumed lag, we probe backward from T-1 until we find a date
+# that actually has data, and cache the result briefly since it only
+# changes once a day when the next batch is published.
+_kofia_base_date_cache = {"date": None, "checked_at": 0}
+_KOFIA_BASE_DATE_TTL_SECONDS = 3600
+
+
+def kofia_probe_has_data(date_str):
+    body = f"""<?xml version="1.0" encoding="utf-8"?>
+<message>
+  <proframeHeader>
+    <pfmAppName>FS-DIS2</pfmAppName>
+    <pfmSvcName>DISFundStdPriceSO</pfmSvcName>
+    <pfmFnName>select</pfmFnName>
+  </proframeHeader>
+  <systemHeader></systemHeader>
+    <DISCondFuncDTO>
+    <tmpV30>{date_str}</tmpV30>
+    <tmpV3></tmpV3>
+    <tmpV4></tmpV4>
+    <tmpV7>1</tmpV7>
+    <tmpV5></tmpV5>
+    <tmpV11></tmpV11>
+    <tmpV12>코스피200</tmpV12>
+    <tmpV50></tmpV50>
+    <tmpV51></tmpV51>
+</DISCondFuncDTO>
+</message>
+"""
+    r = requests.post(KOFIA_URL, data=body.encode("utf-8"), headers=KOFIA_HEADERS, timeout=15, verify=False)
+    r.raise_for_status()
+    m = re.search(r"<dbio_total_count_>(\d+)</dbio_total_count_>", r.text)
+    return bool(m) and int(m.group(1)) > 0
+
+
+def kofia_resolve_base_date():
+    now = time.time()
+    cache = _kofia_base_date_cache
+    if cache["date"] and now - cache["checked_at"] < _KOFIA_BASE_DATE_TTL_SECONDS:
+        return cache["date"]
+    d = datetime.now() - timedelta(days=1)
+    resolved = None
+    for _ in range(10):
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        date_str = d.strftime("%Y%m%d")
+        try:
+            if kofia_probe_has_data(date_str):
+                resolved = date_str
+                break
+        except requests.RequestException:
+            pass
+        d -= timedelta(days=1)
+    resolved = resolved or kofia_last_business_day()
+    cache["date"] = resolved
+    cache["checked_at"] = now
+    return resolved
+
+
 def parse_kofia_date(value):
     if not value or len(value) != 8:
         return None
@@ -683,7 +745,7 @@ def fetch_kofia_funds(name_query):
   </proframeHeader>
   <systemHeader></systemHeader>
     <DISCondFuncDTO>
-    <tmpV30>{kofia_last_business_day()}</tmpV30>
+    <tmpV30>{kofia_resolve_base_date()}</tmpV30>
     <tmpV3></tmpV3>
     <tmpV4></tmpV4>
     <tmpV7>1</tmpV7>
@@ -782,7 +844,7 @@ def fetch_kofia_nav_history(code, start_date, end_date):
 
 
 def fetch_kofia_risk_stats(code):
-    end_date = kofia_last_business_day()
+    end_date = kofia_resolve_base_date()
     start_date = (datetime.now() - timedelta(days=3 * 365 + 14)).strftime("%Y%m%d")
     dates, closes = fetch_kofia_nav_history(code, start_date, end_date)
     volatility, var975, days_covered = compute_risk_stats(dates, closes)
