@@ -516,7 +516,7 @@ function renderDetail(d) {
       </div>
       <div class="holdings-section" id="holdingsSection">
         <button type="button" class="holdings-toggle" id="holdingsToggle" aria-expanded="false">
-          <span>구성종목</span>
+          <span>구성종목<span id="holdingsCount"></span></span>
           <span class="holdings-arrow">▼</span>
         </button>
         <div id="holdingsBody" class="holdings-body" hidden>조회 중…</div>
@@ -547,6 +547,8 @@ async function loadHoldings(symbol) {
       body.innerHTML = `<p class="empty" style="margin:0;">${r.message || '구성종목 정보를 찾을 수 없습니다.'}</p>`;
       return;
     }
+    const countEl = $('#holdingsCount');
+    if (countEl) countEl.textContent = ` (${r.holdings.length})`;
     const asOf = r.asOfDate ? `<div class="updated-at" style="margin-top:6px;">기준일자: ${fmtDate(r.asOfDate)}</div>` : '';
     body.innerHTML = `
       <table class="holdings-table">

@@ -1093,8 +1093,44 @@ def fetch_tiger_holdings(krx_code):
     return {"holdings": holdings, "asOfDate": fix_date.replace(".", "-") if fix_date else None}
 
 
+def fetch_kiwoom_holdings(krx_code):
+    """Return holdings for a KIWOOM/KOSEF (키움투자자산운용) ETF, or None if
+    krx_code isn't one of theirs. No ticker map is needed here — the site's
+    API takes the KRX code directly and returns an empty list for codes it
+    doesn't recognize, so a persistently empty result (across the lookback
+    window) is treated as "not a KIWOOM fund"."""
+    items = []
+    work_dt = None
+    for days_back in range(10):
+        work_dt = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
+        r = requests.post(
+            "https://www.kiwoometf.com/service/etf/KO02010200MAjax4",
+            data={"schGubun1": krx_code, "startDate": work_dt},
+            headers=KODEX_HEADERS,
+            timeout=15,
+        )
+        r.raise_for_status()
+        items = (r.json() or {}).get("pdfList") or []
+        if items:
+            break
+    if not items:
+        return None
+    holdings = []
+    for item in items:
+        code = item.get("itemCode") or ""
+        if code.startswith("KR7") and len(code) >= 9:
+            code = code[3:9]
+        wt = item.get("ratio")
+        try:
+            weight = float(str(wt).replace("%", "")) if wt not in (None, "") else None
+        except ValueError:
+            weight = None
+        holdings.append({"code": code, "name": item.get("itemTitle"), "weight": weight})
+    return {"holdings": holdings, "asOfDate": parse_kofia_date(work_dt)}
+
+
 def fetch_etf_holdings(krx_code):
-    for fetcher in (fetch_kodex_holdings, fetch_sol_holdings, fetch_tiger_holdings):
+    for fetcher in (fetch_kodex_holdings, fetch_sol_holdings, fetch_tiger_holdings, fetch_kiwoom_holdings):
         try:
             data = fetcher(krx_code)
         except requests.RequestException:
@@ -1111,7 +1147,7 @@ def api_holdings(symbol):
     except requests.RequestException as e:
         return jsonify({"error": f"구성종목 조회 중 오류가 발생했습니다: {e}"}), 502
     if data is None:
-        return jsonify({"holdings": None, "message": "KODEX·SOL·TIGER 브랜드 ETF만 구성종목을 지원합니다."})
+        return jsonify({"holdings": None, "message": "KODEX·SOL·TIGER·KIWOOM(KOSEF) 브랜드 ETF만 구성종목을 지원합니다."})
     return jsonify(data)
 
 
