@@ -1,3 +1,4 @@
+import concurrent.futures
 import json
 import os
 import re
@@ -1173,6 +1174,78 @@ def fetch_rise_holdings(krx_code):
     return {"holdings": holdings, "asOfDate": as_of}
 
 
+# Market (KOSPI/KOSDAQ) + market cap + market-cap rank for individual
+# constituent stocks inside ETF holdings, sourced from Naver's mobile stock
+# API (paginated market-cap ranking, 100 rows/page). Fetched in parallel
+# since a full pass is ~25 pages for KOSPI + ~19 for KOSDAQ; cached for an
+# hour since intraday rank churn is negligible for this purpose.
+_market_cap_cache = {"map": None, "fetched_at": 0}
+_MARKET_CAP_TTL_SECONDS = 3600
+
+
+def _fetch_market_value_page(market, page):
+    r = requests.get(
+        f"https://m.stock.naver.com/api/stocks/marketValue/{market}",
+        params={"page": page, "pageSize": 100},
+        headers=HEADERS,
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _fetch_market_value_all(market):
+    first = _fetch_market_value_page(market, 1)
+    stocks = list(first.get("stocks") or [])
+    total = first.get("totalCount") or 0
+    total_pages = -(-total // 100)  # ceil
+    if total_pages > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
+            futures = [ex.submit(_fetch_market_value_page, market, p) for p in range(2, total_pages + 1)]
+            for fut in futures:
+                try:
+                    stocks.extend(fut.result().get("stocks") or [])
+                except requests.RequestException:
+                    continue  # a dropped page just leaves a small rank gap; best-effort
+    return stocks
+
+
+def fetch_market_cap_map():
+    now = time.time()
+    cache = _market_cap_cache
+    if cache["map"] is not None and now - cache["fetched_at"] < _MARKET_CAP_TTL_SECONDS:
+        return cache["map"]
+    mapping = {}
+    for market, label in (("KOSPI", "코스피"), ("KOSDAQ", "코스닥")):
+        stocks = _fetch_market_value_all(market)
+        for rank, s in enumerate(stocks, start=1):
+            code = s.get("itemCode")
+            if not code:
+                continue
+            market_value = num(s.get("marketValue"))  # Naver reports this in 억원 (100M-won) units
+            mapping[code] = {
+                "market": label,
+                "marketCap": market_value * 1e8 if market_value is not None else None,
+                "marketCapRank": rank,
+            }
+    cache["map"] = mapping
+    cache["fetched_at"] = now
+    return mapping
+
+
+def enrich_holdings_with_market_cap(holdings):
+    try:
+        market_cap_map = fetch_market_cap_map()
+    except requests.RequestException:
+        market_cap_map = {}
+    for h in holdings:
+        info = market_cap_map.get(h.get("code"))
+        h["market"] = info["market"] if info else None
+        h["marketCap"] = info["marketCap"] if info else None
+        h["marketCapRank"] = info["marketCapRank"] if info else None
+    return holdings
+
+
 def fetch_etf_holdings(krx_code):
     for fetcher in (
         fetch_kodex_holdings,
@@ -1186,6 +1259,7 @@ def fetch_etf_holdings(krx_code):
         except requests.RequestException:
             continue
         if data is not None:
+            data["holdings"] = enrich_holdings_with_market_cap(data["holdings"])
             return data
     return None
 
