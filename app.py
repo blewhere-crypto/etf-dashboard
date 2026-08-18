@@ -1234,8 +1234,10 @@ def _build_market_cap_map():
                 }
         if mapping:
             _market_cap_cache["map"] = mapping
-            _market_cap_cache["fetched_at"] = time.time()
     finally:
+        # Stamp fetched_at even on failure so a persistently failing
+        # upstream is retried at most once per TTL, not on every request.
+        _market_cap_cache["fetched_at"] = time.time()
         _market_cap_cache["building"] = False
 
 
@@ -1324,10 +1326,14 @@ def _build_us_market_cap_map():
                 rank += 1
         if mapping:
             _us_market_cap_cache["map"] = mapping
-            _us_market_cap_cache["fetched_at"] = time.time()
     except requests.RequestException:
         pass
     finally:
+        # Stamp fetched_at even on failure (e.g. Yahoo's crumb-authenticated
+        # endpoints being blocked from this host entirely) so a persistently
+        # failing upstream is retried at most once per TTL instead of on
+        # every single request that needs it.
+        _us_market_cap_cache["fetched_at"] = time.time()
         _us_market_cap_cache["building"] = False
 
 
@@ -1356,6 +1362,7 @@ def fetch_us_market_cap_map():
 # holdings view is never blocked on it.
 _US_EXCHANGE_CACHE_TTL = 24 * 3600
 _us_exchange_cache = {}
+_us_exchange_pending = set()
 _us_exchange_lock = threading.Lock()
 
 
@@ -1371,17 +1378,24 @@ def _fetch_us_chart_exchange(ticker):
 
 
 def _background_fetch_us_exchanges(tickers):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
-        results = dict(zip(tickers, ex.map(_fetch_us_chart_exchange, tickers)))
-    now = time.time()
-    with _us_exchange_lock:
-        for t, exch in results.items():
-            _us_exchange_cache[t] = {"exchange": exch, "fetched_at": now}
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+            results = dict(zip(tickers, ex.map(_fetch_us_chart_exchange, tickers)))
+        now = time.time()
+        with _us_exchange_lock:
+            for t, exch in results.items():
+                _us_exchange_cache[t] = {"exchange": exch, "fetched_at": now}
+    finally:
+        with _us_exchange_lock:
+            _us_exchange_pending.difference_update(tickers)
 
 
 def get_us_exchange_map(tickers):
     """Non-blocking: returns whatever's already cached for these tickers and
-    kicks off a background fetch (threaded) for the rest."""
+    kicks off a background fetch (threaded) for the rest — but only for
+    tickers that aren't already being fetched by an earlier, still-running
+    background call, so repeated requests for the same (uncached) holdings
+    don't keep stacking up new thread pools on top of each other."""
     now = time.time()
     with _us_exchange_lock:
         cached = {
@@ -1389,7 +1403,8 @@ def get_us_exchange_map(tickers):
             for t, v in _us_exchange_cache.items()
             if t in tickers and now - v["fetched_at"] < _US_EXCHANGE_CACHE_TTL
         }
-        to_fetch = [t for t in tickers if t not in cached]
+        to_fetch = [t for t in tickers if t not in cached and t not in _us_exchange_pending]
+        _us_exchange_pending.update(to_fetch)
     if to_fetch:
         threading.Thread(target=_background_fetch_us_exchanges, args=(to_fetch,), daemon=True).start()
     return cached
