@@ -1343,6 +1343,58 @@ def fetch_us_market_cap_map():
     return cache["map"] or {}
 
 
+# Fallback exchange lookup for US tickers the screener-based map above
+# doesn't have. Yahoo's crumb-authenticated endpoints (quoteSummary,
+# screener) turned out to be blocked from Render's outbound IP — confirmed
+# by the fact that quoteSummary-sourced fields (AUM/expense ratio for
+# overseas ETFs) were already silently empty in production before this
+# feature existed. The unauthenticated chart endpoint (`/v8/finance/chart`),
+# which the app already relies on for overseas price data, is NOT blocked,
+# and its `meta` includes the listing exchange (just not market cap or
+# rank) — so it's used here as a same-request-shape fallback, individually
+# per ticker but cached indefinitely-ish and fetched in the background so a
+# holdings view is never blocked on it.
+_US_EXCHANGE_CACHE_TTL = 24 * 3600
+_us_exchange_cache = {}
+_us_exchange_lock = threading.Lock()
+
+
+def _fetch_us_chart_exchange(ticker):
+    try:
+        r = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}", headers=HEADERS, timeout=8)
+        r.raise_for_status()
+        result = (r.json().get("chart") or {}).get("result") or [{}]
+        meta = result[0].get("meta") or {}
+        return meta.get("fullExchangeName") or meta.get("exchangeName")
+    except requests.RequestException:
+        return None
+
+
+def _background_fetch_us_exchanges(tickers):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+        results = dict(zip(tickers, ex.map(_fetch_us_chart_exchange, tickers)))
+    now = time.time()
+    with _us_exchange_lock:
+        for t, exch in results.items():
+            _us_exchange_cache[t] = {"exchange": exch, "fetched_at": now}
+
+
+def get_us_exchange_map(tickers):
+    """Non-blocking: returns whatever's already cached for these tickers and
+    kicks off a background fetch (threaded) for the rest."""
+    now = time.time()
+    with _us_exchange_lock:
+        cached = {
+            t: v["exchange"]
+            for t, v in _us_exchange_cache.items()
+            if t in tickers and now - v["fetched_at"] < _US_EXCHANGE_CACHE_TTL
+        }
+        to_fetch = [t for t in tickers if t not in cached]
+    if to_fetch:
+        threading.Thread(target=_background_fetch_us_exchanges, args=(to_fetch,), daemon=True).start()
+    return cached
+
+
 def enrich_holdings_with_market_cap(holdings):
     try:
         kr_map = fetch_market_cap_map()
@@ -1352,17 +1404,32 @@ def enrich_holdings_with_market_cap(holdings):
         us_map = fetch_us_market_cap_map()
     except requests.RequestException:
         us_map = {}
-    for h in holdings:
+
+    fallback_tickers = []
+    fallback_indices = {}
+    for i, h in enumerate(holdings):
         code = h.get("code") or ""
         info = kr_map.get(code)
         if not info:
             m = _BLOOMBERG_US_EQUITY_RE.match(code)
             if m:
-                info = us_map.get(m.group(1).upper().replace(".", "-"))
+                ticker = m.group(1).upper().replace(".", "-")
+                info = us_map.get(ticker)
+                if not info:
+                    fallback_indices[i] = ticker
+                    fallback_tickers.append(ticker)
         h["market"] = info["market"] if info else None
         h["marketCap"] = info["marketCap"] if info else None
         h["marketCapRank"] = info["marketCapRank"] if info else None
         h["currency"] = info.get("currency", "KRW") if info else None
+
+    if fallback_tickers:
+        exchange_map = get_us_exchange_map(fallback_tickers)
+        for i, ticker in fallback_indices.items():
+            exchange = exchange_map.get(ticker)
+            if exchange:
+                holdings[i]["market"] = _YAHOO_EXCHANGE_LABELS.get(exchange, exchange)
+                holdings[i]["currency"] = "USD"
     return holdings
 
 
