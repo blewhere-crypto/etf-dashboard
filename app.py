@@ -1129,8 +1129,58 @@ def fetch_kiwoom_holdings(krx_code):
     return {"holdings": holdings, "asOfDate": parse_kofia_date(work_dt)}
 
 
+def fetch_rise_holdings(krx_code):
+    """Return holdings for a RISE (KB자산운용, 구 KBSTAR) ETF, or None if
+    krx_code isn't one of theirs. The fund detail page is fully
+    server-rendered (holdings table included), so a single GET is enough
+    once we've resolved the KRX code to RISE's own internal fund code via
+    their search endpoint."""
+    r = requests.post(
+        "https://www.riseetf.co.kr/prod/finder/listJquery",
+        data={"searchText": krx_code},
+        headers=KODEX_HEADERS,
+        timeout=15,
+    )
+    r.raise_for_status()
+    m = re.search(r"finderDetail/([0-9A-Za-z]+)", r.text)
+    if not m:
+        return None
+    fund_cd = m.group(1)
+
+    r2 = requests.get(f"https://www.riseetf.co.kr/prod/finderDetail/{fund_cd}", headers=KODEX_HEADERS, timeout=20)
+    r2.raise_for_status()
+    html = r2.text
+    date_m = re.search(r'id="datepicker_pdf" value="([\d\-]+)"', html)
+    as_of = date_m.group(1) if date_m else None
+
+    body_m = re.search(r'data-class="tab3PdfList">(.*?)</tbody>', html, re.S)
+    holdings = []
+    if body_m:
+        for row in re.finditer(r"<tr>(.*?)</tr>", body_m.group(1), re.S):
+            cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", row.group(1), re.S)
+            if len(cells) < 5:
+                continue
+            name = re.sub(r"<[^>]+>", "", cells[1]).strip()
+            code = re.sub(r"<[^>]+>", "", cells[2]).strip()
+            if code.startswith("KR7") and len(code) >= 9:
+                code = code[3:9]
+            weight_raw = re.sub(r"<[^>]+>", "", cells[4]).strip()
+            try:
+                weight = float(weight_raw) if weight_raw else None
+            except ValueError:
+                weight = None
+            holdings.append({"code": code, "name": name, "weight": weight})
+    return {"holdings": holdings, "asOfDate": as_of}
+
+
 def fetch_etf_holdings(krx_code):
-    for fetcher in (fetch_kodex_holdings, fetch_sol_holdings, fetch_tiger_holdings, fetch_kiwoom_holdings):
+    for fetcher in (
+        fetch_kodex_holdings,
+        fetch_sol_holdings,
+        fetch_tiger_holdings,
+        fetch_kiwoom_holdings,
+        fetch_rise_holdings,
+    ):
         try:
             data = fetcher(krx_code)
         except requests.RequestException:
@@ -1147,7 +1197,7 @@ def api_holdings(symbol):
     except requests.RequestException as e:
         return jsonify({"error": f"구성종목 조회 중 오류가 발생했습니다: {e}"}), 502
     if data is None:
-        return jsonify({"holdings": None, "message": "KODEX·SOL·TIGER·KIWOOM(KOSEF) 브랜드 ETF만 구성종목을 지원합니다."})
+        return jsonify({"holdings": None, "message": "KODEX·SOL·TIGER·KIWOOM(KOSEF)·RISE(KBSTAR) 브랜드 ETF만 구성종목을 지원합니다."})
     return jsonify(data)
 
 
