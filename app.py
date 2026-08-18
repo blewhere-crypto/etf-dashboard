@@ -1269,7 +1269,7 @@ _YAHOO_EXCHANGE_LABELS = {
     "NasdaqGS": "나스닥",
     "NasdaqGM": "나스닥",
     "NasdaqCM": "나스닥",
-    "NYSE": "뉴욕증권거래소",
+    "NYSE": "NYSE",
     "NYSEArca": "NYSE Arca",
     "NYSEAMERICAN": "NYSE American",
     "BATS": "BATS",

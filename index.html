@@ -198,6 +198,7 @@
   .market-tag { font-weight: 600; }
   .market-tag.market-kospi { color: var(--up); }
   .market-tag.market-kosdaq { color: var(--down); }
+  .market-tag.market-nyse { color: var(--up); }
   .market-tag.market-other { color: var(--accent); }
 
   .msg { padding: 14px 16px; border-radius: 10px; font-size: 14px; margin-bottom: 20px; }
@@ -353,6 +354,7 @@ function fmtCompact(n) {
 function marketTagClass(market) {
   if (market === '코스피') return 'market-kospi';
   if (market === '코스닥') return 'market-kosdaq';
+  if (market && market.startsWith('NYSE')) return 'market-nyse';
   return 'market-other';
 }
 function fmtAssets(n, currency) {
