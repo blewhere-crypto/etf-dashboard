@@ -1361,6 +1361,7 @@ def fetch_us_market_cap_map():
 # per ticker but cached indefinitely-ish and fetched in the background so a
 # holdings view is never blocked on it.
 _US_EXCHANGE_CACHE_TTL = 24 * 3600
+_US_EXCHANGE_FALLBACK_LIMIT = 15
 _us_exchange_cache = {}
 _us_exchange_pending = set()
 _us_exchange_lock = threading.Lock()
@@ -1439,9 +1440,15 @@ def enrich_holdings_with_market_cap(holdings):
         h["currency"] = info.get("currency", "KRW") if info else None
 
     if fallback_tickers:
-        exchange_map = get_us_exchange_map(fallback_tickers)
-        for i, ticker in fallback_indices.items():
-            exchange = exchange_map.get(ticker)
+        # Cap to the most heavily-weighted holdings needing the fallback —
+        # those are what a user actually looks at, and it keeps the
+        # per-request thread/request count small and predictable regardless
+        # of how many total US names the fund holds (some hold 500+).
+        top_indices = sorted(fallback_indices, key=lambda i: -(holdings[i].get("weight") or 0))[:_US_EXCHANGE_FALLBACK_LIMIT]
+        top_tickers = [fallback_indices[i] for i in top_indices]
+        exchange_map = get_us_exchange_map(top_tickers)
+        for i in top_indices:
+            exchange = exchange_map.get(fallback_indices[i])
             if exchange:
                 holdings[i]["market"] = _YAHOO_EXCHANGE_LABELS.get(exchange, exchange)
                 holdings[i]["currency"] = "USD"
