@@ -864,13 +864,15 @@ def api_fund_risk(code):
         return jsonify({"error": f"변동성 계산 중 오류가 발생했습니다: {e}"}), 502
 
 
-# KODEX (Samsung Asset Management) publishes each ETF's full daily holdings
-# (구성종목) on its own site, no login required. This only covers the KODEX
-# brand — other issuers (TIGER/ACE/KBSTAR/SOL/...) would need their own
-# per-site integration, which we haven't built. The site's own terms
-# prohibit unauthorized bulk databasing of its content, so we only fetch a
-# single ETF's holdings on demand (when a user opens that ETF's detail
-# card) rather than mirroring the whole catalog.
+# Each ETF issuer publishes its own funds' full daily holdings (구성종목) on
+# its own site, no login required, but there's no single shared source (KRX's
+# holdings page requires login). Each issuer needs its own per-site
+# integration; only KODEX/SOL/TIGER are implemented so far, covering the
+# majority of domestic ETFs by AUM. Other issuers (ACE/KBSTAR·RISE/...) fall
+# through to the "not supported" message. Sites' own terms generally prohibit
+# unauthorized bulk databasing of their content, so we only fetch a single
+# ETF's holdings on demand (when a user opens that ETF's detail card) rather
+# than mirroring the whole catalog.
 KODEX_HEADERS = {"User-Agent": HEADERS["User-Agent"]}
 _kodex_ticker_map_cache = {"map": None, "fetched_at": 0}
 _KODEX_TICKER_MAP_TTL_SECONDS = 3600
@@ -940,14 +942,176 @@ def fetch_kodex_holdings(krx_code):
     }
 
 
+_sol_ticker_map_cache = {"map": None, "fetched_at": 0}
+_SOL_TICKER_MAP_TTL_SECONDS = 3600
+
+
+def fetch_sol_ticker_map():
+    now = time.time()
+    cache = _sol_ticker_map_cache
+    if cache["map"] is not None and now - cache["fetched_at"] < _SOL_TICKER_MAP_TTL_SECONDS:
+        return cache["map"]
+    r = requests.post(
+        "https://www.soletf.com/api/common/searchByEtfNameOrFilter",
+        data={"viewCount": 300},
+        headers=KODEX_HEADERS,
+        timeout=15,
+    )
+    r.raise_for_status()
+    items = (r.json() or {}).get("items") or []
+    mapping = {}
+    for it in items:
+        ticker = it.get("ETF_CD6")
+        fund_cd = it.get("FUND_CD")
+        if ticker and fund_cd:
+            mapping[ticker] = fund_cd
+    cache["map"] = mapping
+    cache["fetched_at"] = now
+    return mapping
+
+
+def fetch_sol_holdings(krx_code):
+    """Return holdings for a SOL (신한자산운용) ETF, or None if krx_code isn't
+    a SOL-branded fund."""
+    try:
+        ticker_map = fetch_sol_ticker_map()
+    except requests.RequestException:
+        return None
+    fund_cd = ticker_map.get(krx_code)
+    if not fund_cd:
+        return None
+    items = []
+    work_dt = None
+    for days_back in range(10):
+        work_dt = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
+        r = requests.get(
+            "https://www.soletf.com/api/fund/pdfList",
+            params={"fund_cd": fund_cd, "work_dt": work_dt},
+            headers=KODEX_HEADERS,
+            timeout=15,
+        )
+        r.raise_for_status()
+        items = r.json() or []
+        if items:
+            break
+    holdings = []
+    for item in items:
+        wt = item.get("WT_DISP")
+        try:
+            weight = float(str(wt).replace("%", "")) if wt not in (None, "") else None
+        except ValueError:
+            weight = None
+        holdings.append({"code": item.get("STOCK_CODE"), "name": item.get("SEC_NM"), "weight": weight})
+    return {"holdings": holdings, "asOfDate": parse_kofia_date(work_dt) if items else None}
+
+
+_tiger_ticker_map_cache = {"map": None, "fetched_at": 0}
+_TIGER_TICKER_MAP_TTL_SECONDS = 3600
+
+
+def fetch_tiger_ticker_map():
+    """Map KRX 6-char code -> Mirae Asset's ksdFund ISIN-style code. The KRX
+    code is embedded in the ISIN itself (KR7 + 6-char code + 3 more chars),
+    so we only need one listing call to build the whole map."""
+    now = time.time()
+    cache = _tiger_ticker_map_cache
+    if cache["map"] is not None and now - cache["fetched_at"] < _TIGER_TICKER_MAP_TTL_SECONDS:
+        return cache["map"]
+    r = requests.post(
+        "https://investments.miraeasset.com/tigeretf/ko/product/search/list.ajax",
+        data={
+            "pdfNameYn": "N",
+            "pageIndex": 1,
+            "firstIndex": 0,
+            "listCnt": 500,
+            "periodType": "short",
+            "listType": "table",
+            "q": "",
+        },
+        headers=KODEX_HEADERS,
+        timeout=20,
+    )
+    r.raise_for_status()
+    mapping = {}
+    for m in re.finditer(r'data-ksd-fund="(KR7[0-9A-Z]{9})"', r.text):
+        ksd_fund = m.group(1)
+        mapping[ksd_fund[3:9]] = ksd_fund
+    cache["map"] = mapping
+    cache["fetched_at"] = now
+    return mapping
+
+
+def fetch_tiger_holdings(krx_code):
+    """Return holdings for a TIGER (미래에셋자산운용) ETF, or None if krx_code
+    isn't a TIGER-branded fund."""
+    try:
+        ticker_map = fetch_tiger_ticker_map()
+    except requests.RequestException:
+        return None
+    ksd_fund = ticker_map.get(krx_code)
+    if not ksd_fund:
+        return None
+    r = requests.get(
+        "https://investments.miraeasset.com/tigeretf/ko/product/search/detail/pdf.ajax",
+        params={"ksdFund": ksd_fund},
+        headers=KODEX_HEADERS,
+        timeout=20,
+    )
+    r.raise_for_status()
+    m = re.search(r'name="fixDate"[^>]*value="([\d.]+)"', r.text)
+    fix_date = m.group(1) if m else ""
+
+    r2 = requests.get(
+        "https://investments.miraeasset.com/tigeretf/ko/product/search/detail/pdfListAjax.ajax",
+        params={
+            "ksdFund": ksd_fund,
+            "pageIndex": 1,
+            "firstIndex": 0,
+            "listCnt": 500,
+            "fixDate": fix_date,
+            "prfPrd": "Week01",
+            "order": "SRD",
+        },
+        headers=KODEX_HEADERS,
+        timeout=20,
+    )
+    r2.raise_for_status()
+    holdings = []
+    for row in re.finditer(r"<tr[^>]*>(.*?)</tr>", r2.text, re.S):
+        tds = re.findall(r"<td[^>]*>(.*?)</td>", row.group(1), re.S)
+        if len(tds) < 5:
+            continue
+        code = re.sub(r"<[^>]+>", "", tds[0]).strip()
+        name = re.sub(r"<[^>]+>", "", tds[1]).strip()
+        weight_raw = re.sub(r"<[^>]+>", "", tds[4]).strip()
+        try:
+            weight = float(weight_raw) if weight_raw else None
+        except ValueError:
+            weight = None
+        if code:
+            holdings.append({"code": code, "name": name, "weight": weight})
+    return {"holdings": holdings, "asOfDate": fix_date.replace(".", "-") if fix_date else None}
+
+
+def fetch_etf_holdings(krx_code):
+    for fetcher in (fetch_kodex_holdings, fetch_sol_holdings, fetch_tiger_holdings):
+        try:
+            data = fetcher(krx_code)
+        except requests.RequestException:
+            continue
+        if data is not None:
+            return data
+    return None
+
+
 @app.route("/api/holdings/<path:symbol>")
 def api_holdings(symbol):
     try:
-        data = fetch_kodex_holdings(symbol)
+        data = fetch_etf_holdings(symbol)
     except requests.RequestException as e:
         return jsonify({"error": f"구성종목 조회 중 오류가 발생했습니다: {e}"}), 502
     if data is None:
-        return jsonify({"holdings": None, "message": "KODEX 브랜드 ETF만 구성종목을 지원합니다."})
+        return jsonify({"holdings": None, "message": "KODEX·SOL·TIGER 브랜드 ETF만 구성종목을 지원합니다."})
     return jsonify(data)
 
 

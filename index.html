@@ -181,6 +181,13 @@
   .updated-at { font-size: 12px; color: var(--text-muted); margin-top: 16px; text-align: right; }
 
   .holdings-section { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+  .holdings-toggle {
+    display: flex; align-items: center; justify-content: space-between; width: 100%;
+    background: none; border: none; padding: 0; margin-bottom: 8px; cursor: pointer;
+    font-size: 12px; color: var(--text-muted); font-family: inherit;
+  }
+  .holdings-arrow { font-size: 10px; }
+  .holdings-body[hidden] { display: none; }
   .holdings-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .holdings-table th { text-align: left; color: var(--text-muted); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--border); }
   .holdings-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
@@ -508,14 +515,25 @@ function renderDetail(d) {
         <div><div class="stat-label">기초지수 VaR 97.5% (${d.benchmarkVar975Period || '기간 미상'})</div><div class="stat-value">${d.benchmarkVar975 != null ? d.benchmarkVar975.toFixed(2) + '%' : '-'}</div></div>
       </div>
       <div class="holdings-section" id="holdingsSection">
-        <div class="stat-label" style="margin-bottom:8px;">구성종목</div>
-        <div id="holdingsBody">조회 중…</div>
+        <button type="button" class="holdings-toggle" id="holdingsToggle" aria-expanded="false">
+          <span>구성종목</span>
+          <span class="holdings-arrow">▼</span>
+        </button>
+        <div id="holdingsBody" class="holdings-body" hidden>조회 중…</div>
       </div>
       <div class="updated-at">조회 시각: ${new Date(d.updatedAt).toLocaleString('ko-KR')}</div>
     </div>
   `;
 
   $('#saveBtn').addEventListener('click', () => toggleSave(d, 'etf'));
+  $('#holdingsToggle').addEventListener('click', () => {
+    const btn = $('#holdingsToggle');
+    const body = $('#holdingsBody');
+    const expanded = btn.getAttribute('aria-expanded') === 'true';
+    btn.setAttribute('aria-expanded', String(!expanded));
+    body.hidden = expanded;
+    btn.querySelector('.holdings-arrow').textContent = expanded ? '▼' : '▲';
+  });
   scrollToDetail();
   loadHoldings(d.symbol);
 }
