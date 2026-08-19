@@ -510,22 +510,22 @@ function renderDetail(d) {
         <div class="change ${changeClass}">${sign}${fmtNum(d.change)} (${sign}${fmtNum(d.changePercent)}%)</div>
       </div>
       <div class="stat-grid">
+        <div><div class="stat-label">설정(상장)일</div><div class="stat-value">${fmtDate(d.inceptionDate)}</div></div>
+        <div><div class="stat-label">변동성 (${d.volatilityPeriod || '기간 미상'})</div><div class="stat-value">${d.volatility != null ? d.volatility.toFixed(2) + '%' : '-'}</div></div>
+        <div><div class="stat-label">VaR 97.5% (${d.var975Period || '기간 미상'})</div><div class="stat-value">${d.var975 != null ? d.var975.toFixed(2) + '%' : '-'}</div></div>
         <div><div class="stat-label">순자산총액(AUM)</div><div class="stat-value">${d.totalAssets ? fmtAssets(d.totalAssets, d.currency) : '-'}</div></div>
         <div><div class="stat-label">총보수(연)</div><div class="stat-value">${d.expenseRatio ? (d.expenseRatio * 100).toFixed(2) + '%' : '-'}</div></div>
+        <div><div class="stat-label">기초지수(BM)</div><div class="stat-value">${d.benchmarkIndex || '-'}</div></div>
+        <div><div class="stat-label">기초지수 변동성 (${d.benchmarkVolatilityPeriod || '기간 미상'})</div><div class="stat-value">${d.benchmarkVolatility != null ? d.benchmarkVolatility.toFixed(2) + '%' : '-'}</div></div>
+        <div><div class="stat-label">기초지수 VaR 97.5% (${d.benchmarkVar975Period || '기간 미상'})</div><div class="stat-value">${d.benchmarkVar975 != null ? d.benchmarkVar975.toFixed(2) + '%' : '-'}</div></div>
+        <div><div class="stat-label">60일 평균 거래량</div><div class="stat-value">${d.avgVolume60d ? fmtCompact(d.avgVolume60d) : '-'}</div></div>
+        <div><div class="stat-label">60일 평균 거래대금</div><div class="stat-value">${d.avgTradingValue60d ? fmtAssets(d.avgTradingValue60d, d.currency) : '-'}</div></div>
         <div><div class="stat-label">카테고리</div><div class="stat-value">${d.category || '-'}</div></div>
-        <div><div class="stat-label">운용사</div><div class="stat-value">${d.fundFamily || '-'}</div></div>
         <div><div class="stat-label">52주 최고</div><div class="stat-value">${fmtNum(d.fiftyTwoWeekHigh)}</div></div>
         <div><div class="stat-label">52주 최저</div><div class="stat-value">${fmtNum(d.fiftyTwoWeekLow)}</div></div>
         <div><div class="stat-label">거래량</div><div class="stat-value">${fmtCompact(d.volume)}</div></div>
         <div><div class="stat-label">배당수익률</div><div class="stat-value">${d.yield ? (d.yield * 100).toFixed(2) + '%' : '-'}</div></div>
-        <div><div class="stat-label">설정(상장)일</div><div class="stat-value">${fmtDate(d.inceptionDate)}</div></div>
-        <div><div class="stat-label">60일 평균 거래량</div><div class="stat-value">${d.avgVolume60d ? fmtCompact(d.avgVolume60d) : '-'}</div></div>
-        <div><div class="stat-label">60일 평균 거래대금</div><div class="stat-value">${d.avgTradingValue60d ? fmtAssets(d.avgTradingValue60d, d.currency) : '-'}</div></div>
-        <div><div class="stat-label">기초지수(BM)</div><div class="stat-value">${d.benchmarkIndex || '-'}</div></div>
-        <div><div class="stat-label">변동성 (${d.volatilityPeriod || '기간 미상'})</div><div class="stat-value">${d.volatility != null ? d.volatility.toFixed(2) + '%' : '-'}</div></div>
-        <div><div class="stat-label">기초지수 변동성 (${d.benchmarkVolatilityPeriod || '기간 미상'})</div><div class="stat-value">${d.benchmarkVolatility != null ? d.benchmarkVolatility.toFixed(2) + '%' : '-'}</div></div>
-        <div><div class="stat-label">VaR 97.5% (${d.var975Period || '기간 미상'})</div><div class="stat-value">${d.var975 != null ? d.var975.toFixed(2) + '%' : '-'}</div></div>
-        <div><div class="stat-label">기초지수 VaR 97.5% (${d.benchmarkVar975Period || '기간 미상'})</div><div class="stat-value">${d.benchmarkVar975 != null ? d.benchmarkVar975.toFixed(2) + '%' : '-'}</div></div>
+        <div><div class="stat-label">운용사</div><div class="stat-value">${d.fundFamily || '-'}</div></div>
       </div>
       <div class="holdings-section" id="holdingsSection">
         <button type="button" class="holdings-toggle" id="holdingsToggle" aria-expanded="false">
