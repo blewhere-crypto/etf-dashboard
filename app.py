@@ -1467,6 +1467,226 @@ def enrich_holdings_with_market_cap(holdings):
     return holdings
 
 
+_ace_ticker_map_cache = {"map": None, "fetched_at": 0}
+_ACE_TICKER_MAP_TTL_SECONDS = 3600
+
+
+def fetch_ace_ticker_map():
+    """ACE's own API host (papi.aceetf.co.kr — separate from the www site
+    that serves the pages, which is why earlier attempts against www 404'd)
+    exposes the whole fund list in one call; badge.stockCode is the plain
+    KRX ticker, fundCd is the ISIN-style code its per-fund endpoints want."""
+    now = time.time()
+    cache = _ace_ticker_map_cache
+    if cache["map"] is not None and now - cache["fetched_at"] < _ACE_TICKER_MAP_TTL_SECONDS:
+        return cache["map"]
+    r = requests.get(
+        "https://papi.aceetf.co.kr/api/funds",
+        params={"page": 1, "size": 300},
+        headers=KODEX_HEADERS,
+        timeout=15,
+    )
+    r.raise_for_status()
+    items = (r.json() or {}).get("data") or []
+    mapping = {}
+    for it in items:
+        ticker = (it.get("badge") or {}).get("stockCode")
+        fund_cd = it.get("fundCd")
+        if ticker and fund_cd:
+            mapping[ticker] = fund_cd
+    cache["map"] = mapping
+    cache["fetched_at"] = now
+    return mapping
+
+
+def fetch_ace_holdings(krx_code):
+    """Return holdings for an ACE (한국투자신탁운용) ETF, or None if
+    krx_code isn't one of theirs."""
+    try:
+        ticker_map = fetch_ace_ticker_map()
+    except requests.RequestException:
+        return None
+    fund_cd = ticker_map.get(krx_code)
+    if not fund_cd:
+        return None
+    r = requests.get(
+        f"https://papi.aceetf.co.kr/api/funds/{fund_cd}/pdf",
+        params={"page": 1, "size": 1000},
+        headers={**KODEX_HEADERS, "Accept": "application/json"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    data = r.json() or {}
+    holdings = []
+    for item in data.get("pdfList") or []:
+        holdings.append({"code": item.get("jm_KSC_CD"), "name": item.get("sec_NM"), "weight": item.get("wg")})
+    return {"holdings": holdings, "asOfDate": data.get("std_DT")}
+
+
+def fetch_plus_holdings(krx_code):
+    """Return holdings for a PLUS (한화자산운용, 구 ARIRANG) ETF, or None if
+    krx_code isn't one of theirs. `n` is the plain KRX ticker directly — no
+    separate ticker map needed. The `d` (date, YYYYMMDD) query param is
+    required; omitting it silently falls through to the SPA shell instead
+    of erroring, which is why this wasn't found on the first attempt."""
+    items = []
+    work_dt = None
+    for days_back in range(10):
+        work_dt = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
+        r = requests.get(
+            "https://www.plusetf.co.kr/api/v1/product/pdf/list",
+            params={"n": krx_code, "page": 0, "d": work_dt, "pageSize": 500},
+            headers=KODEX_HEADERS,
+            timeout=15,
+        )
+        r.raise_for_status()
+        items = (r.json() or {}).get("content") or []
+        if items:
+            break
+    if not items:
+        return None
+    holdings = []
+    for item in items:
+        code = item.get("jmCd") or item.get("krJmCd")
+        holdings.append({"code": code, "name": item.get("jmNm"), "weight": item.get("ratio")})
+    return {"holdings": holdings, "asOfDate": parse_kofia_date(work_dt)}
+
+
+_timefolio_ticker_map_cache = {"map": None, "fetched_at": 0}
+_TIMEFOLIO_TICKER_MAP_TTL_SECONDS = 3600
+
+
+def fetch_timefolio_ticker_map():
+    """TIMEFOLIO's fund-list pages are plain server-rendered HTML (two
+    categories: 001 overseas, 002 domestic) — no ajax/JSON API involved
+    anywhere on this site, holdings included."""
+    now = time.time()
+    cache = _timefolio_ticker_map_cache
+    if cache["map"] is not None and now - cache["fetched_at"] < _TIMEFOLIO_TICKER_MAP_TTL_SECONDS:
+        return cache["map"]
+    mapping = {}
+    for cate in ("001", "002"):
+        r = requests.get(
+            "https://timeetf.co.kr/m11_list.php", params={"cate": cate}, headers=KODEX_HEADERS, timeout=15
+        )
+        r.raise_for_status()
+        for m in re.finditer(
+            rf'm11_view\.php\?idx=(\d+)&cate={cate}".*?codeNum"><span>([^<]+)</span>', r.text, re.S
+        ):
+            idx, ticker = m.group(1), m.group(2).strip()
+            mapping[ticker] = (idx, cate)
+    cache["map"] = mapping
+    cache["fetched_at"] = now
+    return mapping
+
+
+def fetch_timefolio_holdings(krx_code):
+    """Return holdings for a TIMEFOLIO (타임폴리오자산운용) ETF, or None if
+    krx_code isn't one of theirs."""
+    try:
+        ticker_map = fetch_timefolio_ticker_map()
+    except requests.RequestException:
+        return None
+    entry = ticker_map.get(krx_code)
+    if not entry:
+        return None
+    idx, cate = entry
+    r = requests.get(
+        "https://timeetf.co.kr/m11_view.php", params={"idx": idx, "cate": cate}, headers=KODEX_HEADERS, timeout=15
+    )
+    r.raise_for_status()
+    html = r.text
+    section_m = re.search(r'id="constituentItems".*?</table>', html, re.S)
+    if not section_m:
+        return None
+    date_m = re.search(r'id="pdfDate"[^>]*value="([\d-]+)"', html)
+    as_of = date_m.group(1) if date_m else None
+    holdings = []
+    for row in re.finditer(
+        r"<tr>\s*<td>(.*?)</td>\s*<td>(.*?)</td>\s*<td>.*?</td>\s*<td>.*?</td>\s*<td>(.*?)</td>\s*</tr>",
+        section_m.group(0),
+        re.S,
+    ):
+        code, name, weight_raw = (g.strip() for g in row.groups())
+        try:
+            weight = float(weight_raw) if weight_raw else None
+        except ValueError:
+            weight = None
+        if code:
+            holdings.append({"code": code, "name": name, "weight": weight})
+    return {"holdings": holdings, "asOfDate": as_of}
+
+
+_koact_ticker_map_cache = {"map": None, "fetched_at": 0}
+_KOACT_TICKER_MAP_TTL_SECONDS = 3600
+
+
+def fetch_koact_ticker_map():
+    """KoAct is 삼성액티브자산운용 — a separate company from Samsung Asset
+    Management (which runs KODEX), despite the shared "Samsung" naming —
+    but its API shape is nearly identical to KODEX's, right down to the
+    field names (fId/stkTicker here vs fund_id/stkTicker there)."""
+    now = time.time()
+    cache = _koact_ticker_map_cache
+    if cache["map"] is not None and now - cache["fetched_at"] < _KOACT_TICKER_MAP_TTL_SECONDS:
+        return cache["map"]
+    mapping = {}
+    page = 1
+    while True:
+        r = requests.get(
+            "https://www.samsungactive.co.kr/api/v1/product/etf.do",
+            params={"graphTerm": "week", "sort": "DESC", "orderType": "YIELD_WEEK", "pageNo": page},
+            headers=KODEX_HEADERS,
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json() or {}
+        items = data.get("etfs") or []
+        if not items:
+            break
+        for it in items:
+            ticker = it.get("stkTicker")
+            fund_id = it.get("fId")
+            if ticker and fund_id:
+                mapping[ticker] = fund_id
+        total = int(data.get("totalCnt") or 0)
+        if len(mapping) >= total or page > 10:
+            break
+        page += 1
+    cache["map"] = mapping
+    cache["fetched_at"] = now
+    return mapping
+
+
+def fetch_koact_holdings(krx_code):
+    """Return holdings for a KoAct (삼성액티브자산운용) ETF, or None if
+    krx_code isn't one of theirs."""
+    try:
+        ticker_map = fetch_koact_ticker_map()
+    except requests.RequestException:
+        return None
+    fund_id = ticker_map.get(krx_code)
+    if not fund_id:
+        return None
+    r = requests.get(
+        f"https://www.samsungactive.co.kr/api/v1/product/etf-pdf/{fund_id}.do",
+        params={"gijunYMD": datetime.now().strftime("%Y%m%d")},
+        headers=KODEX_HEADERS,
+        timeout=15,
+    )
+    r.raise_for_status()
+    pdf = (r.json() or {}).get("pdf") or {}
+    holdings = []
+    for item in pdf.get("list") or []:
+        weight = item.get("ratio")
+        try:
+            weight = float(weight) if weight not in (None, "") else None
+        except ValueError:
+            weight = None
+        holdings.append({"code": item.get("itmNo"), "name": item.get("secNm"), "weight": weight})
+    return {"holdings": holdings, "asOfDate": parse_kofia_date(pdf.get("gijunYMD"))}
+
+
 def fetch_etf_holdings(krx_code):
     for fetcher in (
         fetch_kodex_holdings,
@@ -1474,6 +1694,10 @@ def fetch_etf_holdings(krx_code):
         fetch_tiger_holdings,
         fetch_kiwoom_holdings,
         fetch_rise_holdings,
+        fetch_ace_holdings,
+        fetch_plus_holdings,
+        fetch_timefolio_holdings,
+        fetch_koact_holdings,
     ):
         try:
             data = fetcher(krx_code)
@@ -1492,7 +1716,7 @@ def api_holdings(symbol):
     except requests.RequestException as e:
         return jsonify({"error": f"구성종목 조회 중 오류가 발생했습니다: {e}"}), 502
     if data is None:
-        return jsonify({"holdings": None, "message": "KODEX·SOL·TIGER·KIWOOM(KOSEF)·RISE(KBSTAR) 브랜드 ETF만 구성종목을 지원합니다."})
+        return jsonify({"holdings": None, "message": "KODEX·SOL·TIGER·KIWOOM(KOSEF)·RISE(KBSTAR)·ACE·PLUS(구 ARIRANG)·TIMEFOLIO·KoAct 브랜드 ETF만 구성종목을 지원합니다."})
     return jsonify(data)
 
 
