@@ -120,14 +120,20 @@ def fetch_krx_etf_list():
 
 
 def search_krx_etfs(query):
-    query_norm = _compact(query.strip().lower())
+    query_stripped = query.strip().lower()
+    query_norm = _compact(query_stripped)
     if not query_norm:
         return []
+    # Individual words, so a query like "코스닥 레버리지" still finds
+    # "KODEX 코스닥150레버리지" even though "150" sits between the two
+    # words in the actual name (the single-substring checks below would
+    # miss that, since "코스닥레버리지" isn't a contiguous substring of it).
+    word_norms = [_compact(w) for w in query_stripped.split() if w]
     try:
         items = fetch_krx_etf_list()
     except requests.RequestException:
         return []
-    exact, prefix, contains = [], [], []
+    exact, prefix, contains, word_match = [], [], [], []
     for it in items:
         code = it.get("itemcode", "")
         code_norm = _compact(code.lower())
@@ -146,7 +152,9 @@ def search_krx_etfs(query):
             prefix.append(candidate)
         elif query_norm in name_norm or query_norm in code_norm:
             contains.append(candidate)
-    return (exact + prefix + contains)[:8]
+        elif len(word_norms) > 1 and all(w in name_norm or w in code_norm for w in word_norms):
+            word_match.append(candidate)
+    return (exact + prefix + contains + word_match)[:8]
 
 
 def resolve_krx_code(symbol):
