@@ -480,7 +480,7 @@ def fetch_fnindex_risk_stats(idx_cd):
     try:
         r = requests.post(
             "https://www.fnindex.co.kr/api/getData",
-            json={"url": f"/FI/index/{idx_cd}/excel/data/{org_code}/10Y"},
+            json={"url": f"/FI/index/{idx_cd}/excel/data/{org_code}/3Y"},
             headers={**HEADERS, "Content-Type": "application/json"},
             timeout=15,
         )
@@ -518,7 +518,14 @@ def fetch_tiger_benchmark_risk_stats(krx_code, inception_date):
     ksd_fund = ticker_map.get(krx_code)
     if not ksd_fund:
         return None, None, None
-    start = inception_date.replace("-", "") if inception_date else (datetime.now() - timedelta(days=3 * 365 + 14)).strftime("%Y%m%d")
+    three_years_ago = datetime.now() - timedelta(days=3 * 365 + 14)
+    inception_dt = None
+    if inception_date:
+        try:
+            inception_dt = datetime.strptime(inception_date, "%Y-%m-%d")
+        except ValueError:
+            inception_dt = None
+    start = max(inception_dt, three_years_ago).strftime("%Y%m%d") if inception_dt else three_years_ago.strftime("%Y%m%d")
     r = requests.get(
         "https://investments.miraeasset.com/tigeretf/ko/product/chart/prdct-profit-list.ajax",
         params={"ksdFund": ksd_fund, "strtDt": start, "endDt": datetime.now().strftime("%Y%m%d"), "period": ""},
