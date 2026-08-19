@@ -551,7 +551,11 @@ function renderDetail(d) {
   loadHoldings(d.symbol);
 }
 
-async function loadHoldings(symbol) {
+function looksLikeRealStockCode(code) {
+  return /^\d{6}$/.test(code || '') || /\sUS\s+Equity$/i.test(code || '');
+}
+
+async function loadHoldings(symbol, retriesLeft = 3) {
   const body = $('#holdingsBody');
   try {
     const r = await api('/api/holdings/' + encodeURIComponent(symbol));
@@ -563,6 +567,9 @@ async function loadHoldings(symbol) {
     const countEl = $('#holdingsCount');
     if (countEl) countEl.textContent = ` (${r.holdings.length})`;
     const asOf = r.asOfDate ? `<div class="updated-at" style="margin-top:6px;">기준일자: ${fmtDate(r.asOfDate)}</div>` : '';
+    // 서버가 잠들었다 막 깨어난 직후엔 시장/시가총액 캐시가 비어있다가 몇 초~수십 초 뒤
+    // 채워지므로, 실제 종목인데 시장 정보가 비어있으면 잠시 후 자동으로 다시 불러온다.
+    const stillWarmingUp = retriesLeft > 0 && r.holdings.some(h => h.weight != null && h.market == null && looksLikeRealStockCode(h.code));
     body.innerHTML = `
       <div class="holdings-table-scroll">
       <table class="holdings-table">
@@ -581,8 +588,12 @@ async function loadHoldings(symbol) {
         </tbody>
       </table>
       </div>
+      ${stillWarmingUp ? `<div class="updated-at" style="margin-top:6px;">시장·시가총액 정보 불러오는 중…</div>` : ''}
       ${asOf}
     `;
+    if (stillWarmingUp) {
+      setTimeout(() => loadHoldings(symbol, retriesLeft - 1), 7000);
+    }
   } catch {
     if (body && document.body.contains(body)) body.innerHTML = `<p class="empty" style="margin:0;">구성종목 조회 중 오류가 발생했습니다.</p>`;
   }
