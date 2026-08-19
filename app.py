@@ -299,11 +299,17 @@ def fetch_domestic_risk_stats(code):
 
 # Common ETF benchmark index names -> Naver's domestic index chart code.
 # Naver doesn't expose a name->code search for indices, so this only covers
-# the broad-market indices Naver actually has a chart feed for. The many
-# custom/thematic indices Korean ETFs track (KRX 반도체, FnGuide/WISE/iSelect
-# sector indices, etc.) are calculated by private index providers with no
-# free public historical series we could find — those stay unmapped and the
-# UI shows "-" rather than guessing.
+# the broad-market indices Naver actually has a chart feed for. Most other
+# custom/thematic indices Korean ETFs track are FnGuide-calculated, handled
+# separately below (fetch_fnindex_risk_stats) since FnGuide's own site has
+# the history. iSelect (NH투자증권's index brand) needs a login on NH's own
+# site, but TIGER-issued ETFs tracking one can still get their benchmark's
+# risk stats via fetch_tiger_benchmark_risk_stats (the issuer's own site
+# charts each fund's benchmark performance regardless of who calculates the
+# index). A few others (KRX 자체 지수, WISE 등, or any non-TIGER ETF
+# tracking an iSelect index) still have no free public historical series we
+# could find — those stay unmapped and the UI shows "-" rather than
+# guessing.
 DOMESTIC_INDEX_CODES = {
     "코스피 200": "KPI200",
     "코스피200": "KPI200",
@@ -386,6 +392,173 @@ def fetch_domestic_index_risk_stats(index_code):
     return fetch_naver_daily_series_risk_stats(f"https://api.stock.naver.com/chart/domestic/index/{index_code}/day")
 
 
+# FnGuide (에프앤가이드) calculates most of the custom/thematic indices
+# Korean ETFs track that aren't in DOMESTIC_INDEX_CODES above. Its public
+# index site (fnindex.co.kr) is a Next.js app with no dedicated search API,
+# but every index detail page's SSR props embed the *entire* index catalog
+# as a category tree (fetched once here and flattened into a name lookup)
+# plus that specific index's ORG_IDX_CD (a per-index data-source code that
+# varies index-to-index and is required for the history call). History
+# itself comes from the same JSON endpoint the site's own "Excel export"
+# button calls (`/api/getData`, a same-origin proxy to FnGuide's backend
+# taking a `url` field) — despite the "excel" path segment it returns plain
+# JSON, not a spreadsheet.
+_fnindex_tree_cache = {"map": None, "fetched_at": 0}
+_FNINDEX_TREE_TTL_SECONDS = 24 * 3600
+_fnindex_org_code_cache = {}
+
+
+def fetch_fnindex_name_map():
+    now = time.time()
+    cache = _fnindex_tree_cache
+    if cache["map"] is not None and now - cache["fetched_at"] < _FNINDEX_TREE_TTL_SECONDS:
+        return cache["map"]
+    r = requests.get("https://www.fnindex.co.kr/overview/detail/I/FI00.WLT.BSY", headers=HEADERS, timeout=15)
+    r.raise_for_status()
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.S)
+    mapping = {}
+    if m:
+        data = json.loads(m.group(1))
+        tree = data.get("props", {}).get("pageProps", {}).get("indexList") or []
+
+        def walk(nodes):
+            for node in nodes:
+                if isinstance(node, list):
+                    walk(node)
+                    continue
+                name, code = node.get("IDX_NM"), node.get("IDX_CD")
+                if name and code:
+                    mapping[_compact(name.lower())] = code
+                if node.get("children"):
+                    walk(node["children"])
+
+        walk(tree)
+    cache["map"] = mapping
+    cache["fetched_at"] = now
+    return mapping
+
+
+def resolve_fnindex_code(benchmark_name):
+    normalized = _compact(normalize_benchmark_name(benchmark_name).lower())
+    if not normalized:
+        return None
+    try:
+        name_map = fetch_fnindex_name_map()
+    except requests.RequestException:
+        return None
+    if normalized in name_map:
+        return name_map[normalized]
+    best = None
+    for name, code in name_map.items():
+        if name and (name in normalized or normalized in name):
+            if best is None or len(name) > len(best[0]):
+                best = (name, code)
+    return best[1] if best else None
+
+
+def fetch_fnindex_org_code(idx_cd):
+    if idx_cd in _fnindex_org_code_cache:
+        return _fnindex_org_code_cache[idx_cd]
+    r = requests.get(f"https://www.fnindex.co.kr/overview/detail/I/{idx_cd}", headers=HEADERS, timeout=15)
+    r.raise_for_status()
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.S)
+    org_code = None
+    if m:
+        data = json.loads(m.group(1))
+        org_code = data.get("props", {}).get("pageProps", {}).get("indexInfo", {}).get("ORG_IDX_CD")
+    _fnindex_org_code_cache[idx_cd] = org_code
+    return org_code
+
+
+def fetch_fnindex_risk_stats(idx_cd):
+    try:
+        org_code = fetch_fnindex_org_code(idx_cd)
+    except requests.RequestException:
+        return None, None, None
+    if not org_code:
+        return None, None, None
+    try:
+        r = requests.post(
+            "https://www.fnindex.co.kr/api/getData",
+            json={"url": f"/FI/index/{idx_cd}/excel/data/{org_code}/10Y"},
+            headers={**HEADERS, "Content-Type": "application/json"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        rows = (r.json() or {}).get("VALUE") or []
+    except requests.RequestException:
+        return None, None, None
+    dates, closes = [], []
+    for row in rows:
+        dt = row.get("DT")
+        try:
+            dates.append(datetime.strptime(dt, "%Y.%m.%d").date() if dt else None)
+        except ValueError:
+            dates.append(None)
+        closes.append(row.get("CLS_PRC"))
+    return compute_risk_stats(dates, closes)
+
+
+def fetch_tiger_benchmark_risk_stats(krx_code, inception_date):
+    """Last-resort fallback for benchmark indices with no public historical
+    series anywhere else — notably NH투자증권's "iSelect" brand (used by
+    several TIGER-issued ETFs), whose own site turned out to need a login
+    for historical data. TIGER's own fund detail page charts each of its
+    funds' *own* benchmark-index performance regardless of which provider
+    calculates it, so this only works when the ETF being priced is itself
+    TIGER-issued (reuses the ticker map already built for TIGER holdings) —
+    it can't look up an arbitrary index by name the way the other resolvers
+    do. Returns a % of cumulative return since `inception_date` rather than
+    an absolute index level, which `compute_risk_stats` doesn't care about
+    (it only uses day-over-day % changes)."""
+    try:
+        ticker_map = fetch_tiger_ticker_map()
+    except requests.RequestException:
+        return None, None, None
+    ksd_fund = ticker_map.get(krx_code)
+    if not ksd_fund:
+        return None, None, None
+    start = inception_date.replace("-", "") if inception_date else (datetime.now() - timedelta(days=3 * 365 + 14)).strftime("%Y%m%d")
+    r = requests.get(
+        "https://investments.miraeasset.com/tigeretf/ko/product/chart/prdct-profit-list.ajax",
+        params={"ksdFund": ksd_fund, "strtDt": start, "endDt": datetime.now().strftime("%Y%m%d"), "period": ""},
+        headers={**KODEX_HEADERS, "X-Requested-With": "XMLHttpRequest"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    rows = (r.json() or {}).get("rtnData") or []
+    dates, levels = [], []
+    for row in rows:
+        wkdate = row.get("wkdateStr")
+        jisu = row.get("jisu")
+        if wkdate is None or jisu is None:
+            continue
+        try:
+            dates.append(datetime.strptime(wkdate, "%Y-%m-%d").date())
+        except ValueError:
+            continue
+        levels.append(100 * (1 + jisu / 100))
+    return compute_risk_stats(dates, levels)
+
+
+def fetch_benchmark_risk_stats(benchmark_name, krx_code=None, inception_date=None):
+    domestic_code = resolve_domestic_index_code(benchmark_name)
+    if domestic_code:
+        return fetch_domestic_index_risk_stats(domestic_code)
+    overseas_ticker = resolve_overseas_index_ticker(benchmark_name)
+    if overseas_ticker:
+        return fetch_overseas_risk_stats(overseas_ticker)
+    fnindex_code = resolve_fnindex_code(benchmark_name)
+    if fnindex_code:
+        return fetch_fnindex_risk_stats(fnindex_code)
+    if krx_code:
+        try:
+            return fetch_tiger_benchmark_risk_stats(krx_code, inception_date)
+        except requests.RequestException:
+            pass
+    return None, None, None
+
+
 def fetch_overseas_risk_stats(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     try:
@@ -458,15 +631,9 @@ def fetch_domestic_quote(code):
     averages_60d = fetch_60d_averages(code)
     volatility, var975, volatility_days = fetch_domestic_risk_stats(code)
 
-    benchmark_index_code = resolve_domestic_index_code(coinfo.get("benchmarkIndex"))
-    if benchmark_index_code:
-        benchmark_volatility, benchmark_var975, benchmark_volatility_days = fetch_domestic_index_risk_stats(benchmark_index_code)
-    else:
-        overseas_index_ticker = resolve_overseas_index_ticker(coinfo.get("benchmarkIndex"))
-        if overseas_index_ticker:
-            benchmark_volatility, benchmark_var975, benchmark_volatility_days = fetch_overseas_risk_stats(overseas_index_ticker)
-        else:
-            benchmark_volatility, benchmark_var975, benchmark_volatility_days = None, None, None
+    benchmark_volatility, benchmark_var975, benchmark_volatility_days = fetch_benchmark_risk_stats(
+        coinfo.get("benchmarkIndex"), krx_code=code, inception_date=coinfo.get("inceptionDate")
+    )
 
     total_map = {i["code"]: i.get("value") for i in detail.get("totalInfos", []) if "code" in i}
     key_ind = detail.get("etfKeyIndicator") or {}
