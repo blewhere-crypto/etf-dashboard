@@ -810,23 +810,38 @@ def fetch_kiwoom_benchmark_risk_stats(krx_code, inception_date):
 
 
 def fetch_issuer_benchmark_risk_stats(krx_code, inception_date):
-    for fetcher in (
+    """Runs all five issuers' fetchers concurrently rather than one at a
+    time — a ticker only ever belongs to one of them, so at most one call
+    does real (slow) work while the rest return almost immediately on a
+    ticker-map miss, but KODEX's history fetch (~37 paginated requests) is
+    slow even to fail on, and trying it first in a sequential chain was
+    delaying a fast, correct answer from a later issuer (e.g. KIWOOM) by
+    however long KODEX took to give up. This whole function already only
+    ever runs on a background thread (see get_issuer_benchmark_risk_stats_
+    cached), so the extra thread pool here isn't blocking anything."""
+    fetchers = (
         fetch_kodex_benchmark_risk_stats,
         fetch_sol_benchmark_risk_stats,
         fetch_tiger_benchmark_risk_stats,
         fetch_kiwoom_benchmark_risk_stats,
         fetch_rise_benchmark_risk_stats,
-    ):
-        try:
-            volatility, var975, days = fetcher(krx_code, inception_date)
-        except Exception:
-            # Broad on purpose: these issuer-site scrapers parse loosely
-            # structured JSON/HTML that can shift shape without warning, and
-            # one fetcher's bug shouldn't stop the rest of the chain from
-            # being tried.
-            continue
-        if volatility is not None:
-            return volatility, var975, days
+    )
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=len(fetchers))
+    try:
+        futures = [ex.submit(f, krx_code, inception_date) for f in fetchers]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                volatility, var975, days = fut.result()
+            except Exception:
+                # Broad on purpose: these issuer-site scrapers parse loosely
+                # structured JSON/HTML that can shift shape without warning,
+                # and one fetcher's bug shouldn't stop the rest from being
+                # tried.
+                continue
+            if volatility is not None:
+                return volatility, var975, days
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
     return None, None, None
 
 
