@@ -306,10 +306,13 @@ def fetch_domestic_risk_stats(code):
 # site, but TIGER-issued ETFs tracking one can still get their benchmark's
 # risk stats via fetch_tiger_benchmark_risk_stats (the issuer's own site
 # charts each fund's benchmark performance regardless of who calculates the
-# index). A few others (KRX 자체 지수, WISE 등, or any non-TIGER ETF
-# tracking an iSelect index) still have no free public historical series we
-# could find — those stay unmapped and the UI shows "-" rather than
-# guessing.
+# index). WISE (와이즈에프앤, FnGuide's sister brand) covers a further set
+# of custom/theme indices, handled below (fetch_wiseindex_risk_stats) the
+# same way as FnGuide. KRX's own custom indices (KRX 반도체 등) and any
+# non-TIGER ETF tracking an iSelect index still have no free public
+# historical series we could find (KRX's index price-history pages are
+# login-walled the same as its ETF-holdings pages) — those stay unmapped
+# and the UI shows "-" rather than guessing.
 DOMESTIC_INDEX_CODES = {
     "코스피 200": "KPI200",
     "코스피200": "KPI200",
@@ -499,6 +502,88 @@ def fetch_fnindex_risk_stats(idx_cd):
     return compute_risk_stats(dates, closes)
 
 
+# WISE (와이즈에프앤, wiseindex.com) is FnGuide's sister brand — same
+# company family, different site (ASP.NET/AngularJS rather than Next.js) —
+# and calculates a separate set of custom/theme indices FnGuide doesn't.
+# Like FnGuide, its whole index catalog is fetchable as one tree (no
+# separate search API), and per-index history comes from the same
+# overview endpoint the site's own detail page uses. History only goes
+# back about a year (vs. FnGuide's much longer backtests), which is fine —
+# fetch_benchmark_risk_stats already reports whatever's actually available
+# rather than requiring the full 3-year window.
+_wiseindex_tree_cache = {"map": None, "fetched_at": 0}
+_WISEINDEX_TREE_TTL_SECONDS = 24 * 3600
+
+
+def fetch_wiseindex_name_map():
+    now = time.time()
+    cache = _wiseindex_tree_cache
+    if cache["map"] is not None and now - cache["fetched_at"] < _WISEINDEX_TREE_TTL_SECONDS:
+        return cache["map"]
+    r = requests.get("https://www.wiseindex.com/API/Tree/Get", params={"id": 4}, headers=HEADERS, timeout=15)
+    r.raise_for_status()
+    tree = r.json() or []
+    mapping = {}
+
+    def walk(nodes):
+        for node in nodes:
+            if node.get("isIndex"):
+                name, code = node.get("title"), node.get("key")
+                if name and code:
+                    mapping[_compact(name.lower())] = code
+            if node.get("children"):
+                walk(node["children"])
+
+    walk(tree)
+    cache["map"] = mapping
+    cache["fetched_at"] = now
+    return mapping
+
+
+def resolve_wiseindex_code(benchmark_name):
+    normalized = _compact(normalize_benchmark_name(benchmark_name).lower())
+    if not normalized:
+        return None
+    try:
+        name_map = fetch_wiseindex_name_map()
+    except requests.RequestException:
+        return None
+    if normalized in name_map:
+        return name_map[normalized]
+    best = None
+    for name, code in name_map.items():
+        if name and (name in normalized or normalized in name):
+            if best is None or len(name) > len(best[0]):
+                best = (name, code)
+    return best[1] if best else None
+
+
+def fetch_wiseindex_risk_stats(sec_cd):
+    try:
+        r = requests.get(
+            "https://www.wiseindex.com/Index/GetIndexOverview",
+            params={"sec_cd": sec_cd, "ceil_yn": -1},
+            headers={
+                **HEADERS,
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": f"https://www.wiseindex.com/Index/Index?{sec_cd}",
+            },
+            timeout=15,
+        )
+        r.raise_for_status()
+        rows = (r.json() or {}).get("data") or []
+    except requests.RequestException:
+        return None, None, None
+    dates, closes = [], []
+    for row in rows:
+        if not isinstance(row, list) or len(row) < 2:
+            continue
+        ts, close = row[0], row[1]
+        dates.append(datetime.utcfromtimestamp(ts / 1000).date() if ts is not None else None)
+        closes.append(close)
+    return compute_risk_stats(dates, closes)
+
+
 def fetch_tiger_benchmark_risk_stats(krx_code, inception_date):
     """Last-resort fallback for benchmark indices with no public historical
     series anywhere else — notably NH투자증권's "iSelect" brand (used by
@@ -558,6 +643,9 @@ def fetch_benchmark_risk_stats(benchmark_name, krx_code=None, inception_date=Non
     fnindex_code = resolve_fnindex_code(benchmark_name)
     if fnindex_code:
         return fetch_fnindex_risk_stats(fnindex_code)
+    wiseindex_code = resolve_wiseindex_code(benchmark_name)
+    if wiseindex_code:
+        return fetch_wiseindex_risk_stats(wiseindex_code)
     if krx_code:
         try:
             return fetch_tiger_benchmark_risk_stats(krx_code, inception_date)
