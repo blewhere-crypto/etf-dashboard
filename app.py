@@ -826,6 +826,40 @@ def fetch_issuer_benchmark_risk_stats(krx_code, inception_date):
     return None, None, None
 
 
+# fetch_issuer_benchmark_risk_stats can end up making dozens of requests
+# (KODEX's benchmark history alone is ~37 paginated calls) across up to 5
+# issuer sites tried in sequence — confirmed too slow to run inline in a
+# request on Render (hit the same gunicorn-timeout 502 the market-cap
+# enrichment did earlier). Wrapped the same way: cache per KRX code, kick
+# off exactly one background rebuild when stale, and return whatever's
+# cached right now (None the first time) without blocking.
+_issuer_benchmark_cache = {}
+_issuer_benchmark_lock = threading.Lock()
+_ISSUER_BENCHMARK_TTL_SECONDS = 3600
+
+
+def _build_issuer_benchmark_cache(krx_code, inception_date):
+    try:
+        result = fetch_issuer_benchmark_risk_stats(krx_code, inception_date)
+    except requests.RequestException:
+        result = (None, None, None)
+    _issuer_benchmark_cache[krx_code] = {"result": result, "fetched_at": time.time(), "building": False}
+
+
+def get_issuer_benchmark_risk_stats_cached(krx_code, inception_date):
+    now = time.time()
+    entry = _issuer_benchmark_cache.get(krx_code)
+    is_stale = entry is None or now - entry["fetched_at"] >= _ISSUER_BENCHMARK_TTL_SECONDS
+    if is_stale and not (entry and entry.get("building")):
+        with _issuer_benchmark_lock:
+            entry = _issuer_benchmark_cache.get(krx_code)
+            if not (entry and entry.get("building")):
+                _issuer_benchmark_cache[krx_code] = {**(entry or {"result": (None, None, None), "fetched_at": 0}), "building": True}
+                threading.Thread(target=_build_issuer_benchmark_cache, args=(krx_code, inception_date), daemon=True).start()
+    entry = _issuer_benchmark_cache.get(krx_code)
+    return entry["result"] if entry else (None, None, None)
+
+
 def fetch_benchmark_risk_stats(benchmark_name, krx_code=None, inception_date=None):
     domestic_code = resolve_domestic_index_code(benchmark_name)
     if domestic_code:
@@ -840,7 +874,7 @@ def fetch_benchmark_risk_stats(benchmark_name, krx_code=None, inception_date=Non
     if wiseindex_code:
         return fetch_wiseindex_risk_stats(wiseindex_code)
     if krx_code:
-        return fetch_issuer_benchmark_risk_stats(krx_code, inception_date)
+        return get_issuer_benchmark_risk_stats_cached(krx_code, inception_date)
     return None, None, None
 
 

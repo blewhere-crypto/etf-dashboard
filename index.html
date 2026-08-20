@@ -458,14 +458,19 @@ function renderCandidates(results, kind) {
   });
 }
 
-async function loadDetail(symbol) {
+async function loadDetail(symbol, retriesLeft = 3) {
   candidatesArea.innerHTML = '';
-  showMessage('정보를 불러오는 중입니다…');
+  if (retriesLeft === 3) showMessage('정보를 불러오는 중입니다…');
   try {
     const d = await api('/api/quote/' + encodeURIComponent(symbol));
     clearMessage();
     renderDetail(d);
     if (d.hasData) recordHistory(d, 'etf');
+    // 서버가 막 깨어난 직후엔 기초지수 데이터가 운용사 사이트에서 백그라운드로
+    // 채워지는 중이라 잠깐 비어 보일 수 있으므로, 그 경우 잠시 후 다시 조회한다.
+    if (d.hasData && d.market === '국내' && d.benchmarkIndex && d.benchmarkVolatility == null && retriesLeft > 0) {
+      setTimeout(() => loadDetail(symbol, retriesLeft - 1), 7000);
+    }
   } catch (e) {
     showMessage(e.message, 'error');
   }
