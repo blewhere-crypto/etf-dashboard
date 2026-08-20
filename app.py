@@ -584,18 +584,32 @@ def fetch_wiseindex_risk_stats(sec_cd):
     return compute_risk_stats(dates, closes)
 
 
+# Issuer-site benchmark fallbacks. All five issuers whose own sites this
+# app already resolves KRX-ticker -> internal-id for (to fetch holdings)
+# turned out to also chart each of their own funds' benchmark-index
+# performance, regardless of which company actually calculates that index
+# — useful for brands like NH투자증권's "iSelect" that require a login on
+# their own site. Each function only works for ETFs issued by that specific
+# company (it can't look up an arbitrary index by name), so
+# fetch_issuer_benchmark_risk_stats below tries them in turn as a final
+# resort after the name-based resolvers (Naver/Yahoo/FnGuide/WISE) fail.
+def _capped_lookback_start(inception_date):
+    """The later (more recent) of `inception_date` and 3 years ago, so a
+    long-listed fund's benchmark stats stay capped at 3 years like every
+    other source. Some issuer sites clamp an over-early date on their own;
+    others (TIGER, confirmed) return nothing at all for one, so it's safer
+    to always compute the real bound ourselves."""
+    three_years_ago = datetime.now() - timedelta(days=3 * 365 + 14)
+    if not inception_date:
+        return three_years_ago
+    try:
+        inception_dt = datetime.strptime(inception_date, "%Y-%m-%d")
+    except ValueError:
+        return three_years_ago
+    return max(inception_dt, three_years_ago)
+
+
 def fetch_tiger_benchmark_risk_stats(krx_code, inception_date):
-    """Last-resort fallback for benchmark indices with no public historical
-    series anywhere else — notably NH투자증권's "iSelect" brand (used by
-    several TIGER-issued ETFs), whose own site turned out to need a login
-    for historical data. TIGER's own fund detail page charts each of its
-    funds' *own* benchmark-index performance regardless of which provider
-    calculates it, so this only works when the ETF being priced is itself
-    TIGER-issued (reuses the ticker map already built for TIGER holdings) —
-    it can't look up an arbitrary index by name the way the other resolvers
-    do. Returns a % of cumulative return since `inception_date` rather than
-    an absolute index level, which `compute_risk_stats` doesn't care about
-    (it only uses day-over-day % changes)."""
     try:
         ticker_map = fetch_tiger_ticker_map()
     except requests.RequestException:
@@ -603,17 +617,10 @@ def fetch_tiger_benchmark_risk_stats(krx_code, inception_date):
     ksd_fund = ticker_map.get(krx_code)
     if not ksd_fund:
         return None, None, None
-    three_years_ago = datetime.now() - timedelta(days=3 * 365 + 14)
-    inception_dt = None
-    if inception_date:
-        try:
-            inception_dt = datetime.strptime(inception_date, "%Y-%m-%d")
-        except ValueError:
-            inception_dt = None
-    start = max(inception_dt, three_years_ago).strftime("%Y%m%d") if inception_dt else three_years_ago.strftime("%Y%m%d")
+    start = _capped_lookback_start(inception_date)
     r = requests.get(
         "https://investments.miraeasset.com/tigeretf/ko/product/chart/prdct-profit-list.ajax",
-        params={"ksdFund": ksd_fund, "strtDt": start, "endDt": datetime.now().strftime("%Y%m%d"), "period": ""},
+        params={"ksdFund": ksd_fund, "strtDt": start.strftime("%Y%m%d"), "endDt": datetime.now().strftime("%Y%m%d"), "period": ""},
         headers={**KODEX_HEADERS, "X-Requested-With": "XMLHttpRequest"},
         timeout=15,
     )
@@ -633,6 +640,192 @@ def fetch_tiger_benchmark_risk_stats(krx_code, inception_date):
     return compute_risk_stats(dates, levels)
 
 
+def _fetch_kodex_benchmark_page(fund_id, page):
+    r = requests.get(
+        f"https://m.samsungfund.com/api/v1/kodex/product-price/{fund_id}.do",
+        params={"srchTerm": 36, "pageNo": page},
+        headers=KODEX_HEADERS,
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json() or []
+
+
+def fetch_kodex_benchmark_risk_stats(krx_code, inception_date):
+    """3 years of monthly-paginated (20 rows/page) benchmark history means
+    ~37 requests — fetched in parallel (small pool; this host has shown it
+    rate-limits under sustained load) rather than one page at a time, both
+    to keep this fast enough to not risk the request timing out and to
+    finish before triggering another 429."""
+    try:
+        ticker_map = fetch_kodex_ticker_map()
+    except requests.RequestException:
+        return None, None, None
+    fund_id = ticker_map.get(krx_code)
+    if not fund_id:
+        return None, None, None
+    try:
+        first = _fetch_kodex_benchmark_page(fund_id, 1)
+    except requests.RequestException:
+        return None, None, None
+    rows = list(first)
+    try:
+        total = int(first[0].get("totCnt") or 0) if first else 0
+    except (ValueError, TypeError):
+        total = len(first)
+    total_pages = min(-(-total // 20), 50)  # ceil, capped as a safety net
+    if total_pages > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+            futures = [ex.submit(_fetch_kodex_benchmark_page, fund_id, p) for p in range(2, total_pages + 1)]
+            for fut in futures:
+                try:
+                    rows.extend(fut.result())
+                except requests.RequestException:
+                    continue  # a dropped page just leaves a small gap; best-effort
+    dates, closes = [], []
+    for row in rows:
+        eval_d = row.get("evalD")
+        try:
+            dates.append(datetime.strptime(eval_d, "%Y%m%d").date() if eval_d else None)
+        except ValueError:
+            dates.append(None)
+        closes.append(num(row.get("bmIdx")))
+    return compute_risk_stats(dates, closes)
+
+
+def fetch_sol_benchmark_risk_stats(krx_code, inception_date):
+    try:
+        ticker_map = fetch_sol_ticker_map()
+    except requests.RequestException:
+        return None, None, None
+    fund_cd = ticker_map.get(krx_code)
+    if not fund_cd:
+        return None, None, None
+    start = _capped_lookback_start(inception_date)
+    r = requests.get(
+        "https://www.soletf.com/api/fund/profitGraph",
+        params={"fund_cd": fund_cd, "date_from": start.strftime("%Y-%m-%d"), "date_to": datetime.now().strftime("%Y-%m-%d")},
+        headers=KODEX_HEADERS,
+        timeout=15,
+    )
+    r.raise_for_status()
+    body = r.json() or {}
+    labels = body.get("labels") or []
+    dataset = next((d for d in body.get("datasets") or [] if d.get("label") == "기초지수"), None)
+    if not dataset:
+        return None, None, None
+    dates, levels = [], []
+    for label, pct in zip(labels, dataset.get("data") or []):
+        try:
+            dates.append(datetime.strptime(label, "%Y-%m-%d").date())
+        except (ValueError, TypeError):
+            continue
+        levels.append(100 * (1 + pct / 100) if pct is not None else None)
+    return compute_risk_stats(dates, levels)
+
+
+def resolve_rise_fund_cd(krx_code):
+    r = requests.post(
+        "https://www.riseetf.co.kr/prod/finder/listJquery",
+        data={"searchText": krx_code},
+        headers=KODEX_HEADERS,
+        timeout=15,
+    )
+    r.raise_for_status()
+    m = re.search(r"finderDetail/([0-9A-Za-z]+)", r.text)
+    return m.group(1) if m else None
+
+
+def fetch_rise_benchmark_risk_stats(krx_code, inception_date):
+    try:
+        fund_cd = resolve_rise_fund_cd(krx_code)
+    except requests.RequestException:
+        return None, None, None
+    if not fund_cd:
+        return None, None, None
+    start = _capped_lookback_start(inception_date)
+    r = requests.post(
+        "https://www.riseetf.co.kr/prod/finder/productViewChartTabJquery2",
+        data={
+            "fundCd": fund_cd,
+            "searchStartDate": start.strftime("%Y-%m-%d"),
+            "searchEndDate": datetime.now().strftime("%Y-%m-%d"),
+            "searchType": "custom",
+        },
+        headers=KODEX_HEADERS,
+        timeout=15,
+    )
+    r.raise_for_status()
+    rows = (r.json() or {}).get("jsonArray") or []
+    dates, levels = [], []
+    for row in rows:
+        date_str = row.get("1||date")
+        pct = num(row.get("3||기초지수"))
+        if not date_str or pct is None:
+            continue
+        try:
+            dates.append(datetime.strptime(date_str, "%Y.%m.%d").date())
+        except ValueError:
+            continue
+        levels.append(100 * (1 + pct / 100))
+    return compute_risk_stats(dates, levels)
+
+
+def fetch_kiwoom_benchmark_risk_stats(krx_code, inception_date):
+    r = requests.get(
+        "https://www.kiwoometf.com/service/etf/KO02010200M",
+        params={"gcode": krx_code},
+        headers=KODEX_HEADERS,
+        timeout=15,
+    )
+    r.raise_for_status()
+    m = re.search(r'fundCode = "(\d+)"', r.text)
+    if not m:
+        return None, None, None
+    fund_code = m.group(1)
+    start = _capped_lookback_start(inception_date)
+    r2 = requests.post(
+        "https://www.kiwoometf.com/service/etf/KO02010200MAjax2",
+        data={
+            "gubun": "earnings",
+            "schGubun1": fund_code,
+            "startDate": start.strftime("%Y-%m-%d"),
+            "endDate": datetime.now().strftime("%Y-%m-%d"),
+            "pageNo": 1,
+        },
+        headers=KODEX_HEADERS,
+        timeout=15,
+    )
+    r2.raise_for_status()
+    rows = (r2.json() or {}).get("yieldChartData") or []
+    dates, closes = [], []
+    for row in rows:
+        stddate = row.get("stddate")
+        try:
+            dates.append(datetime.strptime(stddate, "%Y.%m.%d").date() if stddate else None)
+        except ValueError:
+            dates.append(None)
+        closes.append(row.get("bmIndex"))
+    return compute_risk_stats(dates, closes)
+
+
+def fetch_issuer_benchmark_risk_stats(krx_code, inception_date):
+    for fetcher in (
+        fetch_kodex_benchmark_risk_stats,
+        fetch_sol_benchmark_risk_stats,
+        fetch_tiger_benchmark_risk_stats,
+        fetch_kiwoom_benchmark_risk_stats,
+        fetch_rise_benchmark_risk_stats,
+    ):
+        try:
+            volatility, var975, days = fetcher(krx_code, inception_date)
+        except requests.RequestException:
+            continue
+        if volatility is not None:
+            return volatility, var975, days
+    return None, None, None
+
+
 def fetch_benchmark_risk_stats(benchmark_name, krx_code=None, inception_date=None):
     domestic_code = resolve_domestic_index_code(benchmark_name)
     if domestic_code:
@@ -647,10 +840,7 @@ def fetch_benchmark_risk_stats(benchmark_name, krx_code=None, inception_date=Non
     if wiseindex_code:
         return fetch_wiseindex_risk_stats(wiseindex_code)
     if krx_code:
-        try:
-            return fetch_tiger_benchmark_risk_stats(krx_code, inception_date)
-        except requests.RequestException:
-            pass
+        return fetch_issuer_benchmark_risk_stats(krx_code, inception_date)
     return None, None, None
 
 
@@ -1406,17 +1596,9 @@ def fetch_rise_holdings(krx_code):
     server-rendered (holdings table included), so a single GET is enough
     once we've resolved the KRX code to RISE's own internal fund code via
     their search endpoint."""
-    r = requests.post(
-        "https://www.riseetf.co.kr/prod/finder/listJquery",
-        data={"searchText": krx_code},
-        headers=KODEX_HEADERS,
-        timeout=15,
-    )
-    r.raise_for_status()
-    m = re.search(r"finderDetail/([0-9A-Za-z]+)", r.text)
-    if not m:
+    fund_cd = resolve_rise_fund_cd(krx_code)
+    if not fund_cd:
         return None
-    fund_cd = m.group(1)
 
     r2 = requests.get(f"https://www.riseetf.co.kr/prod/finderDetail/{fund_cd}", headers=KODEX_HEADERS, timeout=20)
     r2.raise_for_status()
