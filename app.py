@@ -819,7 +819,11 @@ def fetch_issuer_benchmark_risk_stats(krx_code, inception_date):
     ):
         try:
             volatility, var975, days = fetcher(krx_code, inception_date)
-        except requests.RequestException:
+        except Exception:
+            # Broad on purpose: these issuer-site scrapers parse loosely
+            # structured JSON/HTML that can shift shape without warning, and
+            # one fetcher's bug shouldn't stop the rest of the chain from
+            # being tried.
             continue
         if volatility is not None:
             return volatility, var975, days
@@ -841,7 +845,11 @@ _ISSUER_BENCHMARK_TTL_SECONDS = 3600
 def _build_issuer_benchmark_cache(krx_code, inception_date):
     try:
         result = fetch_issuer_benchmark_risk_stats(krx_code, inception_date)
-    except requests.RequestException:
+    except Exception:
+        # Must not raise past this point: this runs on a background thread
+        # with nothing watching it, so any uncaught exception here would
+        # leave "building" stuck True forever and permanently wedge this
+        # krx_code's cache entry.
         result = (None, None, None)
     _issuer_benchmark_cache[krx_code] = {"result": result, "fetched_at": time.time(), "building": False}
 
