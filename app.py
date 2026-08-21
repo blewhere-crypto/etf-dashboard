@@ -2024,26 +2024,87 @@ def fetch_ace_holdings(krx_code):
     return {"holdings": holdings, "asOfDate": data.get("std_DT")}
 
 
-def fetch_plus_holdings(krx_code):
-    """Return holdings for a PLUS (한화자산운용, 구 ARIRANG) ETF, or None if
-    krx_code isn't one of theirs. `n` is the plain KRX ticker directly — no
-    separate ticker map needed. The `d` (date, YYYYMMDD) query param is
-    required; omitting it silently falls through to the SPA shell instead
-    of erroring, which is why this wasn't found on the first attempt."""
-    items = []
-    work_dt = None
+_plus_ticker_map_cache = {"map": None, "fetched_at": 0}
+_PLUS_TICKER_MAP_TTL_SECONDS = 3600
+
+
+def fetch_plus_ticker_map():
+    """The `n` param the holdings endpoint wants turned out NOT to always be
+    the plain KRX ticker — that only happened to be true for some funds
+    (apparently newer ones); older PLUS funds (carried over from the
+    ARIRANG rebrand) use a different internal `id`, e.g. PLUS 고배당주
+    (KRX 161510) is `n=006273`. Silently returning empty results for a
+    mismatched `n` (rather than erroring) is what made this look like a
+    missing-date issue rather than a wrong-identifier one. `/product/find/
+    list` gives the real ticker -> id mapping for the whole ~85-fund
+    lineup, paginated 10/page."""
+    now = time.time()
+    cache = _plus_ticker_map_cache
+    if cache["map"] is not None and now - cache["fetched_at"] < _PLUS_TICKER_MAP_TTL_SECONDS:
+        return cache["map"]
+    mapping = {}
+    page = 0
+    while True:
+        r = requests.post(
+            "https://www.plusetf.co.kr/api/v1/product/find/list",
+            json={"searchSortTy": "", "searchSort": "DESC", "page": page, "searchAnnuityOptionTy": None, "searchWord": ""},
+            headers={**KODEX_HEADERS, "Content-Type": "application/json"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json() or {}
+        items = data.get("content") or []
+        for it in items:
+            ticker = it.get("nameCode")
+            internal_id = it.get("id")
+            if ticker and internal_id:
+                mapping[ticker] = internal_id
+        if data.get("last") or not items or page > 20:  # 20-page cap as a safety net
+            break
+        page += 1
+    cache["map"] = mapping
+    cache["fetched_at"] = now
+    return mapping
+
+
+def _fetch_plus_pdf_list(n):
     for days_back in range(10):
         work_dt = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
         r = requests.get(
             "https://www.plusetf.co.kr/api/v1/product/pdf/list",
-            params={"n": krx_code, "page": 0, "d": work_dt, "pageSize": 500},
+            params={"n": n, "page": 0, "d": work_dt, "pageSize": 500},
             headers=KODEX_HEADERS,
             timeout=15,
         )
         r.raise_for_status()
         items = (r.json() or {}).get("content") or []
         if items:
-            break
+            return items, work_dt
+    return [], None
+
+
+def fetch_plus_holdings(krx_code):
+    """Return holdings for a PLUS (한화자산운용, 구 ARIRANG) ETF, or None if
+    krx_code isn't one of theirs. The `d` (date, YYYYMMDD) query param is
+    required; omitting it silently falls through to the SPA shell instead
+    of erroring.
+
+    `n` sometimes equals the plain KRX ticker directly (confirmed for at
+    least one fund) and sometimes doesn't (confirmed for another —
+    apparently older, carried over from the ARIRANG rebrand — whose real
+    `n` only turned up via /product/find/list's ticker map, which itself
+    doesn't seem to list every single fund either). Rather than fully
+    pinning down that inconsistency, try both: the KRX code directly first
+    (no extra request), then the ticker map as a fallback."""
+    items, work_dt = _fetch_plus_pdf_list(krx_code)
+    if not items:
+        try:
+            ticker_map = fetch_plus_ticker_map()
+        except requests.RequestException:
+            ticker_map = {}
+        n = ticker_map.get(krx_code)
+        if n:
+            items, work_dt = _fetch_plus_pdf_list(n)
     if not items:
         return None
     holdings = []
