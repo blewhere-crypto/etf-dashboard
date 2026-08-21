@@ -2269,6 +2269,13 @@ def fetch_etf_holdings(krx_code):
         except requests.RequestException:
             continue
         if data is not None:
+            # Most sources already return weight-descending order, but not
+            # guaranteed for all of them (and the US-exchange enrichment
+            # fallback below relies on that ordering to prioritize which
+            # holdings it looks up first) — sort explicitly so it's always
+            # true regardless of source. Cash-like rows with no weight sink
+            # to the bottom instead of interleaving with real ones.
+            data["holdings"].sort(key=lambda h: h.get("weight") if h.get("weight") is not None else -1, reverse=True)
             data["holdings"] = enrich_holdings_with_market_cap(data["holdings"])
             return data
     return None
