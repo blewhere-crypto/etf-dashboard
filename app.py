@@ -2188,6 +2188,69 @@ def fetch_koact_holdings(krx_code):
     return {"holdings": holdings, "asOfDate": parse_kofia_date(pdf.get("gijunYMD"))}
 
 
+# 1Q (하나자산운용). Revisited after an earlier session wrongly concluded
+# this issuer's holdings endpoint was broken — that conclusion came from
+# comparing a real 1Q ticker against a KODEX ticker (069500) and finding
+# near-identical output, but the endpoint turns out to just not validate
+# ticker ownership at all: it returns *something* for any valid KRX code,
+# not only 1Q's own. Comparing two different real 1Q tickers instead shows
+# clearly distinct, correctly-structured holdings, so the fix is to check
+# the ticker against 1Q's own list before calling it, which the site
+# conveniently embeds in full on its homepage (one request, no per-fund
+# scraping needed).
+_1q_ticker_set_cache = {"set": None, "fetched_at": 0}
+_1Q_TICKER_SET_TTL_SECONDS = 3600
+
+
+def fetch_1q_ticker_set():
+    now = time.time()
+    cache = _1q_ticker_set_cache
+    if cache["set"] is not None and now - cache["fetched_at"] < _1Q_TICKER_SET_TTL_SECONDS:
+        return cache["set"]
+    r = requests.get("https://1qetf.com/", headers=KODEX_HEADERS, timeout=15)
+    r.raise_for_status()
+    codes = set(re.findall(r'no-mainLiveETF__num">([0-9A-Za-z]+)</span>', r.text))
+    cache["set"] = codes
+    cache["fetched_at"] = now
+    return codes
+
+
+def fetch_1q_holdings(krx_code):
+    """Return holdings for a 1Q (하나자산운용) ETF, or None if krx_code
+    isn't one of theirs."""
+    try:
+        ticker_set = fetch_1q_ticker_set()
+    except requests.RequestException:
+        return None
+    if krx_code not in ticker_set:
+        return None
+    r = requests.post(
+        "https://1qetf.com/pages/ETFproducts/ajax/process.php",
+        data={"mode": "get.pdf", "etf_code": krx_code},
+        headers=KODEX_HEADERS,
+        timeout=15,
+    )
+    r.raise_for_status()
+    data = r.json() or {}
+    if not data.get("success"):
+        return None
+    as_of = None
+    holdings = []
+    for item in data.get("results") or []:
+        code = item.get("F16316") or ""
+        if code.startswith("KR7") and len(code) >= 9:
+            code = code[3:9]
+        weight = item.get("F34743")
+        try:
+            weight = float(weight) / 100 if weight not in (None, "") else None
+        except (ValueError, TypeError):
+            weight = None
+        if as_of is None:
+            as_of = item.get("F12506")
+        holdings.append({"code": code, "name": item.get("F16004"), "weight": weight})
+    return {"holdings": holdings, "asOfDate": parse_kofia_date(as_of)}
+
+
 def fetch_etf_holdings(krx_code):
     for fetcher in (
         fetch_kodex_holdings,
@@ -2199,6 +2262,7 @@ def fetch_etf_holdings(krx_code):
         fetch_plus_holdings,
         fetch_timefolio_holdings,
         fetch_koact_holdings,
+        fetch_1q_holdings,
     ):
         try:
             data = fetcher(krx_code)
@@ -2217,7 +2281,7 @@ def api_holdings(symbol):
     except requests.RequestException as e:
         return jsonify({"error": f"구성종목 조회 중 오류가 발생했습니다: {e}"}), 502
     if data is None:
-        return jsonify({"holdings": None, "message": "KODEX·SOL·TIGER·KIWOOM(KOSEF)·RISE(KBSTAR)·ACE·PLUS(구 ARIRANG)·TIMEFOLIO·KoAct 브랜드 ETF만 구성종목을 지원합니다."})
+        return jsonify({"holdings": None, "message": "KODEX·SOL·TIGER·KIWOOM(KOSEF)·RISE(KBSTAR)·ACE·PLUS(구 ARIRANG)·TIMEFOLIO·KoAct·1Q 브랜드 ETF만 구성종목을 지원합니다."})
     return jsonify(data)
 
 
