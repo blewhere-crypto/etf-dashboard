@@ -1314,7 +1314,7 @@ def api_fund_search():
         return jsonify({"error": "검색어를 입력해주세요."}), 400
     try:
         results = fetch_kofia_funds(q)
-    except requests.RequestException as e:
+    except Exception as e:
         return jsonify({"error": f"검색 중 오류가 발생했습니다: {e}"}), 502
     return jsonify({"results": results[:30]})
 
@@ -1378,7 +1378,7 @@ def fetch_kofia_risk_stats(code):
 def api_fund_risk(code):
     try:
         return jsonify(fetch_kofia_risk_stats(code))
-    except requests.RequestException as e:
+    except Exception as e:
         return jsonify({"error": f"변동성 계산 중 오류가 발생했습니다: {e}"}), 502
 
 
@@ -2327,7 +2327,15 @@ def fetch_etf_holdings(krx_code):
     ):
         try:
             data = fetcher(krx_code)
-        except requests.RequestException:
+        except Exception:
+            # Broad on purpose (not just requests.RequestException): these
+            # issuer-site scrapers call r.json() on responses that aren't
+            # guaranteed to actually be JSON (a WAF/block page, a changed
+            # response shape, etc. would raise JSONDecodeError/ValueError,
+            # not a requests error) — confirmed in production as a real
+            # 500 for KIWOOM specifically. One fetcher's failure shouldn't
+            # crash the whole lookup or stop the rest of the chain from
+            # being tried.
             continue
         if data is not None:
             # Most sources already return weight-descending order, but not
@@ -2346,7 +2354,11 @@ def fetch_etf_holdings(krx_code):
 def api_holdings(symbol):
     try:
         data = fetch_etf_holdings(symbol)
-    except requests.RequestException as e:
+    except Exception as e:
+        # Broad on purpose, as a last-resort safety net — see the dispatcher
+        # loop in fetch_etf_holdings for the specific bug this guards
+        # against (a non-JSON response from one issuer site raising
+        # something other than requests.RequestException).
         return jsonify({"error": f"구성종목 조회 중 오류가 발생했습니다: {e}"}), 502
     if data is None:
         return jsonify({"holdings": None, "message": "KODEX·SOL·TIGER·KIWOOM(KOSEF)·RISE(KBSTAR)·ACE·PLUS(구 ARIRANG)·TIMEFOLIO·KoAct·1Q 브랜드 ETF만 구성종목을 지원합니다."})
