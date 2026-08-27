@@ -565,6 +565,13 @@ async function loadHoldings(symbol, retriesLeft = 3) {
   try {
     const r = await api('/api/holdings/' + encodeURIComponent(symbol));
     if (!body || !document.body.contains(body)) return; // user navigated away
+    if (r.pending) {
+      // 서버가 이 종목을 아직 캐시해두지 않아 백그라운드로 조회 중인 상태 —
+      // "지원 안 함"으로 오해하지 않도록 별도 문구를 보여주고 잠시 후 재시도.
+      body.innerHTML = `<p class="empty" style="margin:0;">구성종목 조회 중…</p>`;
+      if (retriesLeft > 0) setTimeout(() => loadHoldings(symbol, retriesLeft - 1), 5000);
+      return;
+    }
     if (!r.holdings || r.holdings.length === 0) {
       body.innerHTML = `<p class="empty" style="margin:0;">${r.message || '구성종목 정보를 찾을 수 없습니다.'}</p>`;
       return;

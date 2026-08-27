@@ -2350,16 +2350,59 @@ def fetch_etf_holdings(krx_code):
     return None
 
 
+# fetch_etf_holdings can end up doing a lot of work on a cache miss (e.g.
+# KODEX's ticker map alone is ~12 paginated requests, on top of whichever
+# issuer's own holdings call) — fine normally, but confirmed in production
+# to blow past gunicorn's request timeout (and get killed, surfacing as a
+# raw 500) once an issuer site is slow/degraded for this host specifically
+# (the same pattern already hit and fixed for market-cap enrichment and
+# benchmark risk stats). Wrapped the same way: cache per KRX code, kick off
+# exactly one background rebuild when stale/missing, and never make a
+# request wait on it — a cache miss returns a distinct "pending" state
+# instead of blocking, which the frontend retries after a short delay.
+_HOLDINGS_PENDING = object()
+_holdings_cache = {}
+_holdings_lock = threading.Lock()
+_HOLDINGS_CACHE_TTL_SECONDS = 3600
+
+
+def _build_holdings_cache(krx_code):
+    try:
+        result = fetch_etf_holdings(krx_code)
+    except Exception:
+        result = None
+    _holdings_cache[krx_code] = {"result": result, "fetched_at": time.time(), "building": False}
+
+
+def get_etf_holdings_cached(krx_code):
+    now = time.time()
+    entry = _holdings_cache.get(krx_code)
+    is_stale = entry is None or now - entry["fetched_at"] >= _HOLDINGS_CACHE_TTL_SECONDS
+    if is_stale and not (entry and entry.get("building")):
+        with _holdings_lock:
+            entry = _holdings_cache.get(krx_code)
+            if not (entry and entry.get("building")):
+                _holdings_cache[krx_code] = {
+                    **(entry or {"result": _HOLDINGS_PENDING, "fetched_at": 0}),
+                    "building": True,
+                }
+                threading.Thread(target=_build_holdings_cache, args=(krx_code,), daemon=True).start()
+    entry = _holdings_cache.get(krx_code)
+    return entry["result"] if entry else _HOLDINGS_PENDING
+
+
 @app.route("/api/holdings/<path:symbol>")
 def api_holdings(symbol):
     try:
-        data = fetch_etf_holdings(symbol)
+        data = get_etf_holdings_cached(symbol)
     except Exception as e:
         # Broad on purpose, as a last-resort safety net — see the dispatcher
         # loop in fetch_etf_holdings for the specific bug this guards
         # against (a non-JSON response from one issuer site raising
         # something other than requests.RequestException).
         return jsonify({"error": f"구성종목 조회 중 오류가 발생했습니다: {e}"}), 502
+    if data is _HOLDINGS_PENDING:
+        return jsonify({"holdings": None, "pending": True})
     if data is None:
         return jsonify({"holdings": None, "message": "KODEX·SOL·TIGER·KIWOOM(KOSEF)·RISE(KBSTAR)·ACE·PLUS(구 ARIRANG)·TIMEFOLIO·KoAct·1Q 브랜드 ETF만 구성종목을 지원합니다."})
     return jsonify(data)
