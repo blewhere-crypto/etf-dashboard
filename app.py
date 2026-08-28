@@ -2325,48 +2325,69 @@ def fetch_1q_holdings(krx_code):
     return {"holdings": holdings, "asOfDate": parse_kofia_date(as_of)}
 
 
+_HOLDINGS_FETCHERS = (
+    fetch_kodex_holdings,
+    fetch_sol_holdings,
+    fetch_tiger_holdings,
+    fetch_kiwoom_holdings,
+    fetch_rise_holdings,
+    fetch_ace_holdings,
+    fetch_plus_holdings,
+    fetch_timefolio_holdings,
+    fetch_koact_holdings,
+    fetch_1q_holdings,
+)
+
+
 def fetch_etf_holdings(krx_code):
-    for fetcher in (
-        fetch_kodex_holdings,
-        fetch_sol_holdings,
-        fetch_tiger_holdings,
-        fetch_kiwoom_holdings,
-        fetch_rise_holdings,
-        fetch_ace_holdings,
-        fetch_plus_holdings,
-        fetch_timefolio_holdings,
-        fetch_koact_holdings,
-        fetch_1q_holdings,
-    ):
-        try:
-            data = fetcher(krx_code)
-        except Exception:
-            # Broad on purpose (not just requests.RequestException): these
-            # issuer-site scrapers call r.json() on responses that aren't
-            # guaranteed to actually be JSON (a WAF/block page, a changed
-            # response shape, etc. would raise JSONDecodeError/ValueError,
-            # not a requests error) — confirmed in production as a real
-            # 500 for KIWOOM specifically. One fetcher's failure shouldn't
-            # crash the whole lookup or stop the rest of the chain from
-            # being tried.
-            continue
-        if data is not None:
-            # Most sources already return weight-descending order, but not
-            # guaranteed for all of them (and the US-exchange enrichment
-            # fallback relies on that ordering to prioritize which holdings
-            # it looks up first) — sort explicitly so it's always true
-            # regardless of source. Cash-like rows with no weight sink to
-            # the bottom instead of interleaving with real ones.
-            #
-            # Deliberately NOT enriching with market/market-cap here: this
-            # function's result is what gets cached (see
-            # get_etf_holdings_cached below), and market-cap enrichment has
-            # its own, separately-warming cache — baking enrichment in here
-            # would freeze in whatever it happened to have (often nothing,
-            # on a cold cache) for the holdings cache's full TTL. Enrichment
-            # is applied fresh on every response instead, in api_holdings.
-            data["holdings"].sort(key=lambda h: h.get("weight") if h.get("weight") is not None else -1, reverse=True)
-            return data
+    """A given ticker only ever belongs to one issuer, so at most one of
+    these calls does real work — trying them one at a time in a fixed order
+    meant a slow-but-eventually-failing issuer earlier in the list (KODEX's
+    ticker map alone is ~12 requests) could delay reaching the *correct*
+    issuer later in the list by however long it took to give up. Confirmed
+    in production: a real KIWOOM ticker resolved instantly called directly,
+    but timed out through the sequential chain while KODEX was degraded.
+    Run all of them concurrently instead and take whichever succeeds
+    first — this already only ever runs on a background thread (see
+    get_etf_holdings_cached below), so the extra thread pool isn't blocking
+    anything."""
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=len(_HOLDINGS_FETCHERS))
+    try:
+        futures = [ex.submit(f, krx_code) for f in _HOLDINGS_FETCHERS]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                data = fut.result()
+            except Exception:
+                # Broad on purpose (not just requests.RequestException):
+                # these issuer-site scrapers call r.json() on responses that
+                # aren't guaranteed to actually be JSON (a WAF/block page, a
+                # changed response shape, etc. would raise
+                # JSONDecodeError/ValueError, not a requests error) —
+                # confirmed in production as a real 500 for KIWOOM
+                # specifically. One fetcher's failure shouldn't crash the
+                # whole lookup or stop the rest from being tried.
+                continue
+            if data is not None:
+                # Most sources already return weight-descending order, but
+                # not guaranteed for all of them (and the US-exchange
+                # enrichment fallback relies on that ordering to prioritize
+                # which holdings it looks up first) — sort explicitly so
+                # it's always true regardless of source. Cash-like rows
+                # with no weight sink to the bottom instead of interleaving
+                # with real ones.
+                #
+                # Deliberately NOT enriching with market/market-cap here:
+                # this function's result is what gets cached (see
+                # get_etf_holdings_cached below), and market-cap enrichment
+                # has its own, separately-warming cache — baking enrichment
+                # in here would freeze in whatever it happened to have
+                # (often nothing, on a cold cache) for the holdings cache's
+                # full TTL. Enrichment is applied fresh on every response
+                # instead, in api_holdings.
+                data["holdings"].sort(key=lambda h: h.get("weight") if h.get("weight") is not None else -1, reverse=True)
+                return data
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
     return None
 
 
