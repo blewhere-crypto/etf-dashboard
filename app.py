@@ -1694,6 +1694,12 @@ def fetch_rise_holdings(krx_code):
 _market_cap_cache = {"map": None, "fetched_at": 0, "building": False}
 _market_cap_lock = threading.Lock()
 _MARKET_CAP_TTL_SECONDS = 3600
+# A build that comes back empty (upstream down, transient network blip, etc.)
+# still stamps fetched_at so we don't hammer a broken endpoint on every
+# request — but backdating it to only "start" this much before the real TTL
+# means we retry within a few minutes instead of being stuck showing no
+# market/market-cap data for a full hour over what might've been a blip.
+_MARKET_CAP_FAILURE_RETRY_SECONDS = 300
 
 
 def _fetch_market_value_page(market, page):
@@ -1724,6 +1730,7 @@ def _fetch_market_value_all(market):
 
 
 def _build_market_cap_map():
+    got_data = False
     try:
         mapping = {}
         for market, label in (("KOSPI", "코스피"), ("KOSDAQ", "코스닥")):
@@ -1741,12 +1748,14 @@ def _build_market_cap_map():
                     "marketCap": market_value * 1e8 if market_value is not None else None,
                     "marketCapRank": rank,
                 }
-        if mapping:
+        got_data = bool(mapping)
+        if got_data:
             _market_cap_cache["map"] = mapping
     finally:
-        # Stamp fetched_at even on failure so a persistently failing
-        # upstream is retried at most once per TTL, not on every request.
-        _market_cap_cache["fetched_at"] = time.time()
+        # See _MARKET_CAP_FAILURE_RETRY_SECONDS above: a real result gets
+        # the full TTL, an empty one is backdated to retry much sooner.
+        now = time.time()
+        _market_cap_cache["fetched_at"] = now if got_data else now - (_MARKET_CAP_TTL_SECONDS - _MARKET_CAP_FAILURE_RETRY_SECONDS)
         _market_cap_cache["building"] = False
 
 
@@ -1810,6 +1819,7 @@ def _fetch_us_market_cap_page(session, crumb, offset):
 
 
 def _build_us_market_cap_map():
+    got_data = False
     try:
         session, crumb = get_session_and_crumb()
         mapping = {}
@@ -1833,16 +1843,19 @@ def _build_us_market_cap_map():
                     "currency": "USD",
                 }
                 rank += 1
-        if mapping:
+        got_data = bool(mapping)
+        if got_data:
             _us_market_cap_cache["map"] = mapping
     except requests.RequestException:
         pass
     finally:
         # Stamp fetched_at even on failure (e.g. Yahoo's crumb-authenticated
         # endpoints being blocked from this host entirely) so a persistently
-        # failing upstream is retried at most once per TTL instead of on
-        # every single request that needs it.
-        _us_market_cap_cache["fetched_at"] = time.time()
+        # failing upstream isn't hammered every request — but (see
+        # _MARKET_CAP_FAILURE_RETRY_SECONDS) still backdated to retry well
+        # before the full TTL, in case a transient issue clears up sooner.
+        now = time.time()
+        _us_market_cap_cache["fetched_at"] = now if got_data else now - (_MARKET_CAP_TTL_SECONDS - _MARKET_CAP_FAILURE_RETRY_SECONDS)
         _us_market_cap_cache["building"] = False
 
 
@@ -2340,12 +2353,19 @@ def fetch_etf_holdings(krx_code):
         if data is not None:
             # Most sources already return weight-descending order, but not
             # guaranteed for all of them (and the US-exchange enrichment
-            # fallback below relies on that ordering to prioritize which
-            # holdings it looks up first) — sort explicitly so it's always
-            # true regardless of source. Cash-like rows with no weight sink
-            # to the bottom instead of interleaving with real ones.
+            # fallback relies on that ordering to prioritize which holdings
+            # it looks up first) — sort explicitly so it's always true
+            # regardless of source. Cash-like rows with no weight sink to
+            # the bottom instead of interleaving with real ones.
+            #
+            # Deliberately NOT enriching with market/market-cap here: this
+            # function's result is what gets cached (see
+            # get_etf_holdings_cached below), and market-cap enrichment has
+            # its own, separately-warming cache — baking enrichment in here
+            # would freeze in whatever it happened to have (often nothing,
+            # on a cold cache) for the holdings cache's full TTL. Enrichment
+            # is applied fresh on every response instead, in api_holdings.
             data["holdings"].sort(key=lambda h: h.get("weight") if h.get("weight") is not None else -1, reverse=True)
-            data["holdings"] = enrich_holdings_with_market_cap(data["holdings"])
             return data
     return None
 
@@ -2405,6 +2425,11 @@ def api_holdings(symbol):
         return jsonify({"holdings": None, "pending": True})
     if data is None:
         return jsonify({"holdings": None, "message": "KODEX·SOL·TIGER·KIWOOM(KOSEF)·RISE(KBSTAR)·ACE·PLUS(구 ARIRANG)·TIMEFOLIO·KoAct·1Q 브랜드 ETF만 구성종목을 지원합니다."})
+    # Applied fresh on every request (not baked into the cached holdings
+    # result — see the comment in fetch_etf_holdings) so it reflects
+    # whatever the separately-warming market-cap caches have *right now*,
+    # including right after the user hits the manual refresh button.
+    data["holdings"] = enrich_holdings_with_market_cap(data["holdings"])
     return jsonify(data)
 
 
