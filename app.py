@@ -1392,15 +1392,37 @@ def api_fund_risk(code):
 # ETF's holdings on demand (when a user opens that ETF's detail card) rather
 # than mirroring the whole catalog.
 KODEX_HEADERS = {"User-Agent": HEADERS["User-Agent"]}
-_kodex_ticker_map_cache = {"map": None, "fetched_at": 0}
+_TICKER_MAP_FAILURE_RETRY_SECONDS = 300
+
+
+def _get_cached_ticker_map(cache, ttl_seconds, build_fn):
+    """Shared cache/refresh logic for the per-issuer ticker-map caches below.
+
+    On a failed build (e.g. an issuer's site returning a block/challenge
+    page instead of JSON) we still stamp fetched_at, but only far enough
+    back to grant a short cooldown -- not the full TTL. These fetchers run
+    on *every* holdings lookup (all issuers are tried in parallel per
+    request), so without this, an issuer that's currently blocking us would
+    get hammered again on every single request, which only prolongs the
+    block. Keep serving whatever map we last had (possibly still empty)
+    in the meantime.
+    """
+    now = time.time()
+    if now - cache["fetched_at"] < ttl_seconds:
+        return cache["map"]
+    try:
+        cache["map"] = build_fn()
+        cache["fetched_at"] = now
+    except Exception:
+        cache["fetched_at"] = now - (ttl_seconds - _TICKER_MAP_FAILURE_RETRY_SECONDS)
+    return cache["map"]
+
+
+_kodex_ticker_map_cache = {"map": {}, "fetched_at": 0}
 _KODEX_TICKER_MAP_TTL_SECONDS = 3600
 
 
-def fetch_kodex_ticker_map():
-    now = time.time()
-    cache = _kodex_ticker_map_cache
-    if cache["map"] is not None and now - cache["fetched_at"] < _KODEX_TICKER_MAP_TTL_SECONDS:
-        return cache["map"]
+def _build_kodex_ticker_map():
     mapping = {}
     page = 1
     while True:
@@ -1422,9 +1444,11 @@ def fetch_kodex_ticker_map():
         if len(items) < 20 or page > 20:  # 20/page; hard cap as a safety net
             break
         page += 1
-    cache["map"] = mapping
-    cache["fetched_at"] = now
     return mapping
+
+
+def fetch_kodex_ticker_map():
+    return _get_cached_ticker_map(_kodex_ticker_map_cache, _KODEX_TICKER_MAP_TTL_SECONDS, _build_kodex_ticker_map)
 
 
 def fetch_kodex_holdings(krx_code):
@@ -1460,15 +1484,11 @@ def fetch_kodex_holdings(krx_code):
     }
 
 
-_sol_ticker_map_cache = {"map": None, "fetched_at": 0}
+_sol_ticker_map_cache = {"map": {}, "fetched_at": 0}
 _SOL_TICKER_MAP_TTL_SECONDS = 3600
 
 
-def fetch_sol_ticker_map():
-    now = time.time()
-    cache = _sol_ticker_map_cache
-    if cache["map"] is not None and now - cache["fetched_at"] < _SOL_TICKER_MAP_TTL_SECONDS:
-        return cache["map"]
+def _build_sol_ticker_map():
     r = requests.post(
         "https://www.soletf.com/api/common/searchByEtfNameOrFilter",
         data={"viewCount": 300},
@@ -1483,9 +1503,11 @@ def fetch_sol_ticker_map():
         fund_cd = it.get("FUND_CD")
         if ticker and fund_cd:
             mapping[ticker] = fund_cd
-    cache["map"] = mapping
-    cache["fetched_at"] = now
     return mapping
+
+
+def fetch_sol_ticker_map():
+    return _get_cached_ticker_map(_sol_ticker_map_cache, _SOL_TICKER_MAP_TTL_SECONDS, _build_sol_ticker_map)
 
 
 def fetch_sol_holdings(krx_code):
@@ -1523,18 +1545,14 @@ def fetch_sol_holdings(krx_code):
     return {"holdings": holdings, "asOfDate": parse_kofia_date(work_dt) if items else None}
 
 
-_tiger_ticker_map_cache = {"map": None, "fetched_at": 0}
+_tiger_ticker_map_cache = {"map": {}, "fetched_at": 0}
 _TIGER_TICKER_MAP_TTL_SECONDS = 3600
 
 
-def fetch_tiger_ticker_map():
+def _build_tiger_ticker_map():
     """Map KRX 6-char code -> Mirae Asset's ksdFund ISIN-style code. The KRX
     code is embedded in the ISIN itself (KR7 + 6-char code + 3 more chars),
     so we only need one listing call to build the whole map."""
-    now = time.time()
-    cache = _tiger_ticker_map_cache
-    if cache["map"] is not None and now - cache["fetched_at"] < _TIGER_TICKER_MAP_TTL_SECONDS:
-        return cache["map"]
     r = requests.post(
         "https://investments.miraeasset.com/tigeretf/ko/product/search/list.ajax",
         data={
@@ -1554,9 +1572,11 @@ def fetch_tiger_ticker_map():
     for m in re.finditer(r'data-ksd-fund="(KR7[0-9A-Z]{9})"', r.text):
         ksd_fund = m.group(1)
         mapping[ksd_fund[3:9]] = ksd_fund
-    cache["map"] = mapping
-    cache["fetched_at"] = now
     return mapping
+
+
+def fetch_tiger_ticker_map():
+    return _get_cached_ticker_map(_tiger_ticker_map_cache, _TIGER_TICKER_MAP_TTL_SECONDS, _build_tiger_ticker_map)
 
 
 def fetch_tiger_holdings(krx_code):
@@ -1981,19 +2001,15 @@ def enrich_holdings_with_market_cap(holdings):
     return holdings
 
 
-_ace_ticker_map_cache = {"map": None, "fetched_at": 0}
+_ace_ticker_map_cache = {"map": {}, "fetched_at": 0}
 _ACE_TICKER_MAP_TTL_SECONDS = 3600
 
 
-def fetch_ace_ticker_map():
+def _build_ace_ticker_map():
     """ACE's own API host (papi.aceetf.co.kr — separate from the www site
     that serves the pages, which is why earlier attempts against www 404'd)
     exposes the whole fund list in one call; badge.stockCode is the plain
     KRX ticker, fundCd is the ISIN-style code its per-fund endpoints want."""
-    now = time.time()
-    cache = _ace_ticker_map_cache
-    if cache["map"] is not None and now - cache["fetched_at"] < _ACE_TICKER_MAP_TTL_SECONDS:
-        return cache["map"]
     r = requests.get(
         "https://papi.aceetf.co.kr/api/funds",
         params={"page": 1, "size": 300},
@@ -2008,9 +2024,11 @@ def fetch_ace_ticker_map():
         fund_cd = it.get("fundCd")
         if ticker and fund_cd:
             mapping[ticker] = fund_cd
-    cache["map"] = mapping
-    cache["fetched_at"] = now
     return mapping
+
+
+def fetch_ace_ticker_map():
+    return _get_cached_ticker_map(_ace_ticker_map_cache, _ACE_TICKER_MAP_TTL_SECONDS, _build_ace_ticker_map)
 
 
 def fetch_ace_holdings(krx_code):
@@ -2037,11 +2055,11 @@ def fetch_ace_holdings(krx_code):
     return {"holdings": holdings, "asOfDate": data.get("std_DT")}
 
 
-_plus_ticker_map_cache = {"map": None, "fetched_at": 0}
+_plus_ticker_map_cache = {"map": {}, "fetched_at": 0}
 _PLUS_TICKER_MAP_TTL_SECONDS = 3600
 
 
-def fetch_plus_ticker_map():
+def _build_plus_ticker_map():
     """The `n` param the holdings endpoint wants turned out NOT to always be
     the plain KRX ticker — that only happened to be true for some funds
     (apparently newer ones); older PLUS funds (carried over from the
@@ -2051,10 +2069,6 @@ def fetch_plus_ticker_map():
     missing-date issue rather than a wrong-identifier one. `/product/find/
     list` gives the real ticker -> id mapping for the whole ~85-fund
     lineup, paginated 10/page."""
-    now = time.time()
-    cache = _plus_ticker_map_cache
-    if cache["map"] is not None and now - cache["fetched_at"] < _PLUS_TICKER_MAP_TTL_SECONDS:
-        return cache["map"]
     mapping = {}
     page = 0
     while True:
@@ -2075,9 +2089,11 @@ def fetch_plus_ticker_map():
         if data.get("last") or not items or page > 20:  # 20-page cap as a safety net
             break
         page += 1
-    cache["map"] = mapping
-    cache["fetched_at"] = now
     return mapping
+
+
+def fetch_plus_ticker_map():
+    return _get_cached_ticker_map(_plus_ticker_map_cache, _PLUS_TICKER_MAP_TTL_SECONDS, _build_plus_ticker_map)
 
 
 def _fetch_plus_pdf_list(n):
@@ -2127,18 +2143,14 @@ def fetch_plus_holdings(krx_code):
     return {"holdings": holdings, "asOfDate": parse_kofia_date(work_dt)}
 
 
-_timefolio_ticker_map_cache = {"map": None, "fetched_at": 0}
+_timefolio_ticker_map_cache = {"map": {}, "fetched_at": 0}
 _TIMEFOLIO_TICKER_MAP_TTL_SECONDS = 3600
 
 
-def fetch_timefolio_ticker_map():
+def _build_timefolio_ticker_map():
     """TIMEFOLIO's fund-list pages are plain server-rendered HTML (two
     categories: 001 overseas, 002 domestic) — no ajax/JSON API involved
     anywhere on this site, holdings included."""
-    now = time.time()
-    cache = _timefolio_ticker_map_cache
-    if cache["map"] is not None and now - cache["fetched_at"] < _TIMEFOLIO_TICKER_MAP_TTL_SECONDS:
-        return cache["map"]
     mapping = {}
     for cate in ("001", "002"):
         r = requests.get(
@@ -2150,9 +2162,13 @@ def fetch_timefolio_ticker_map():
         ):
             idx, ticker = m.group(1), m.group(2).strip()
             mapping[ticker] = (idx, cate)
-    cache["map"] = mapping
-    cache["fetched_at"] = now
     return mapping
+
+
+def fetch_timefolio_ticker_map():
+    return _get_cached_ticker_map(
+        _timefolio_ticker_map_cache, _TIMEFOLIO_TICKER_MAP_TTL_SECONDS, _build_timefolio_ticker_map
+    )
 
 
 def fetch_timefolio_holdings(krx_code):
@@ -2192,19 +2208,15 @@ def fetch_timefolio_holdings(krx_code):
     return {"holdings": holdings, "asOfDate": as_of}
 
 
-_koact_ticker_map_cache = {"map": None, "fetched_at": 0}
+_koact_ticker_map_cache = {"map": {}, "fetched_at": 0}
 _KOACT_TICKER_MAP_TTL_SECONDS = 3600
 
 
-def fetch_koact_ticker_map():
+def _build_koact_ticker_map():
     """KoAct is 삼성액티브자산운용 — a separate company from Samsung Asset
     Management (which runs KODEX), despite the shared "Samsung" naming —
     but its API shape is nearly identical to KODEX's, right down to the
     field names (fId/stkTicker here vs fund_id/stkTicker there)."""
-    now = time.time()
-    cache = _koact_ticker_map_cache
-    if cache["map"] is not None and now - cache["fetched_at"] < _KOACT_TICKER_MAP_TTL_SECONDS:
-        return cache["map"]
     mapping = {}
     page = 1
     while True:
@@ -2228,9 +2240,11 @@ def fetch_koact_ticker_map():
         if len(mapping) >= total or page > 10:
             break
         page += 1
-    cache["map"] = mapping
-    cache["fetched_at"] = now
     return mapping
+
+
+def fetch_koact_ticker_map():
+    return _get_cached_ticker_map(_koact_ticker_map_cache, _KOACT_TICKER_MAP_TTL_SECONDS, _build_koact_ticker_map)
 
 
 def fetch_koact_holdings(krx_code):
@@ -2272,21 +2286,26 @@ def fetch_koact_holdings(krx_code):
 # the ticker against 1Q's own list before calling it, which the site
 # conveniently embeds in full on its homepage (one request, no per-fund
 # scraping needed).
-_1q_ticker_set_cache = {"set": None, "fetched_at": 0}
+_1q_ticker_set_cache = {"set": set(), "fetched_at": 0}
 _1Q_TICKER_SET_TTL_SECONDS = 3600
 
 
 def fetch_1q_ticker_set():
     now = time.time()
     cache = _1q_ticker_set_cache
-    if cache["set"] is not None and now - cache["fetched_at"] < _1Q_TICKER_SET_TTL_SECONDS:
+    if now - cache["fetched_at"] < _1Q_TICKER_SET_TTL_SECONDS:
         return cache["set"]
-    r = requests.get("https://1qetf.com/", headers=KODEX_HEADERS, timeout=15)
-    r.raise_for_status()
-    codes = set(re.findall(r'no-mainLiveETF__num">([0-9A-Za-z]+)</span>', r.text))
-    cache["set"] = codes
-    cache["fetched_at"] = now
-    return codes
+    try:
+        r = requests.get("https://1qetf.com/", headers=KODEX_HEADERS, timeout=15)
+        r.raise_for_status()
+        cache["set"] = set(re.findall(r'no-mainLiveETF__num">([0-9A-Za-z]+)</span>', r.text))
+        cache["fetched_at"] = now
+    except Exception:
+        # See _get_cached_ticker_map's docstring: don't hammer an already-
+        # failing site on every single holdings request, just retry sooner
+        # than the full TTL.
+        cache["fetched_at"] = now - (_1Q_TICKER_SET_TTL_SECONDS - _TICKER_MAP_FAILURE_RETRY_SECONDS)
+    return cache["set"]
 
 
 def fetch_1q_holdings(krx_code):
