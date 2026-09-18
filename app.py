@@ -1394,29 +1394,38 @@ def api_fund_risk(code):
 KODEX_HEADERS = {"User-Agent": HEADERS["User-Agent"]}
 _TICKER_MAP_FAILURE_RETRY_SECONDS = 300
 
-
 def _get_cached_ticker_map(cache, ttl_seconds, build_fn):
     """Shared cache/refresh logic for the per-issuer ticker-map caches below.
 
-    On a failed build (e.g. an issuer's site returning a block/challenge
-    page instead of JSON) we still stamp fetched_at, but only far enough
-    back to grant a short cooldown -- not the full TTL. These fetchers run
-    on *every* holdings lookup (all issuers are tried in parallel per
-    request), so without this, an issuer that's currently blocking us would
-    get hammered again on every single request, which only prolongs the
-    block. Keep serving whatever map we last had (possibly still empty)
-    in the meantime.
+    On a failed OR empty build (e.g. an issuer's site returning a block/
+    challenge page, or a single bad page in a paginated listing that
+    silently comes back empty instead of raising) we still stamp
+    fetched_at, but only far enough back to grant a short cooldown -- not
+    the full TTL. These fetchers run on *every* holdings lookup (all
+    issuers are tried in parallel per request), so without this, an issuer
+    that's currently blocking us would get hammered again on every single
+    request, which only prolongs the block. Keep serving whatever map we
+    last had (possibly still empty) in the meantime.
+
+    Treating an empty build the same as an exception matters: none of
+    these issuers ever genuinely has zero funds, so a build that quietly
+    returns {} (rather than raising) used to get cached as if it were a
+    complete, correct listing -- stranding every ticker lookup for that
+    issuer for the full TTL (up to an hour) instead of retrying soon.
     """
     now = time.time()
     if now - cache["fetched_at"] < ttl_seconds:
         return cache["map"]
     try:
-        cache["map"] = build_fn()
-        cache["fetched_at"] = now
+        new_map = build_fn()
     except Exception:
+        new_map = None
+    if new_map:
+        cache["map"] = new_map
+        cache["fetched_at"] = now
+    else:
         cache["fetched_at"] = now - (ttl_seconds - _TICKER_MAP_FAILURE_RETRY_SECONDS)
     return cache["map"]
-
 
 _kodex_ticker_map_cache = {"map": {}, "fetched_at": 0}
 _KODEX_TICKER_MAP_TTL_SECONDS = 3600
@@ -2420,10 +2429,13 @@ def fetch_etf_holdings(krx_code):
 # exactly one background rebuild when stale/missing, and never make a
 # request wait on it — a cache miss returns a distinct "pending" state
 # instead of blocking, which the frontend retries after a short delay.
+
+
 _HOLDINGS_PENDING = object()
 _holdings_cache = {}
 _holdings_lock = threading.Lock()
 _HOLDINGS_CACHE_TTL_SECONDS = 3600
+_HOLDINGS_FAILURE_RETRY_SECONDS = 300
 
 
 def _build_holdings_cache(krx_code):
@@ -2431,7 +2443,20 @@ def _build_holdings_cache(krx_code):
         result = fetch_etf_holdings(krx_code)
     except Exception:
         result = None
-    _holdings_cache[krx_code] = {"result": result, "fetched_at": time.time(), "building": False}
+    # A `None` result is ambiguous: it can mean "genuinely not one of the
+    # supported issuer brands", but it can just as easily mean every
+    # issuer's fetch happened to fail transiently this one time (e.g. a
+    # per-issuer ticker-map build hit a blip -- see
+    # _get_cached_ticker_map). Caching `None` for the full TTL either way
+    # meant a passing glitch showed "구성종목 미지원" for up to an hour.
+    # Give a `None` result a much shorter cooldown so a real KODEX/SOL/etc.
+    # ticker recovers quickly; a fund that's truly unsupported just gets
+    # retried a bit more often in the background, which is a low price for
+    # not getting stuck.
+    now = time.time()
+    fetched_at = now if result is not None else now - (_HOLDINGS_CACHE_TTL_SECONDS - _HOLDINGS_FAILURE_RETRY_SECONDS)
+    _holdings_cache[krx_code] = {"result": result, "fetched_at": fetched_at, "building": False}
+
 
 
 def get_etf_holdings_cached(krx_code):
