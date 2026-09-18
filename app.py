@@ -248,25 +248,33 @@ def _table_field(html, label):
 
 
 def fetch_naver_coinfo(code):
-    """Scrape the desktop ETF info page for fields the mobile API lacks
-    (listing date, fund type/category, benchmark index). No auth required."""
-    url = f"https://finance.naver.com/item/coinfo.naver?code={code}"
+    """Fetch an ETF's inception date, category, and benchmark index.
+
+    Previously scraped the desktop finance.naver.com/item/coinfo.naver
+    page's HTML table. That page has been superseded by Naver's stock.naver.com
+    redesign, and the relevant table is no longer present in the page's
+    static HTML at all (it's populated client-side), which is why every
+    field silently went missing at once.
+
+    stock.naver.com exposes a dedicated per-ETF JSON endpoint instead
+    (the same one the new site's own "ETF 기본정보" panel uses), which is
+    both simpler and more reliable than scraping ever was. Confirmed
+    fields: listedDate (YYYYMMDD), etfType, etfBaseIdx.
+    """
+    url = f"https://stock.naver.com/api/domestic/detail/{code}/ETFBase"
     try:
         r = requests.get(url, headers=HEADERS, timeout=8)
         r.raise_for_status()
-        text = _decode_naver_page(r)
-    except requests.RequestException:
+        data = r.json()
+    except (requests.RequestException, ValueError):
         return {}
     result = {}
-    inception = _table_field(text, "상장일")
-    if inception:
-        result["inceptionDate"] = parse_korean_date(inception)
-    category = _table_field(text, "유형")
-    if category:
-        result["category"] = category
-    benchmark = _table_field(text, "기초지수")
-    if benchmark:
-        result["benchmarkIndex"] = benchmark
+    if data.get("listedDate"):
+        result["inceptionDate"] = parse_kofia_date(data["listedDate"])
+    if data.get("etfType"):
+        result["category"] = data["etfType"]
+    if data.get("etfBaseIdx"):
+        result["benchmarkIndex"] = data["etfBaseIdx"]
     return result
 
 
