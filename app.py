@@ -189,26 +189,84 @@ def parse_korean_date(value):
     return f"{year}-{int(month):02d}-{int(day):02d}"
 
 
+def _decode_naver_page(response):
+    """Decode a finance.naver.com page using whatever charset the server
+    actually declares, instead of assuming a fixed one.
+
+    This scraper used to hardcode `euc-kr`, which matches how this page
+    was historically served. It appears to have moved to UTF-8 since
+    (finance.naver.com's HTML head now declares `charset=utf-8`) -- and
+    decoding UTF-8 bytes as EUC-KR doesn't raise, it just silently turns
+    every multi-byte Korean character into mojibake. That's exactly the
+    kind of failure that breaks every scraped field on the page at once
+    (상장일/유형/기초지수 all failing together, rather than one at a
+    time), since none of the Korean labels being searched for match
+    their own corrupted bytes anymore.
+    """
+    content_type = response.headers.get("Content-Type", "")
+    m = re.search(r"charset=([\w-]+)", content_type, re.I)
+    charset = m.group(1) if m else None
+    if not charset:
+        head = response.content[:2000].decode("ascii", errors="ignore")
+        m = re.search(r'charset=["\']?([\w-]+)', head, re.I)
+        charset = m.group(1) if m else "utf-8"
+    try:
+        return response.content.decode(charset, errors="replace")
+    except LookupError:
+        return response.content.decode("utf-8", errors="replace")
+
+
+def _strip_tags(html):
+    """Flatten an HTML fragment to its visible text."""
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = (
+        text.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+    )
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _table_field(html, label):
+    """Value of the <td> following the <th> whose text is `label`.
+
+    Kept in addition to the encoding fix above as defense in depth: it
+    doesn't assume what's *inside* either cell (the previous per-field
+    regexes pinned an exact structure -- plain text for 상장일, exactly
+    one <span> for 유형/기초지수 -- so any extra markup silently drops the
+    field with no error). Matching the label, then taking the whole next
+    cell and stripping tags, survives that regardless of encoding.
+    """
+    pattern = rf"<th[^>]*>(?:\s|<[^>]+>)*{re.escape(label)}(?:\s|<[^>]+>)*</th>\s*<td[^>]*>(.*?)</td>"
+    m = re.search(pattern, html, re.S)
+    if not m:
+        return None
+    value = _strip_tags(m.group(1))
+    return value or None
+
+
 def fetch_naver_coinfo(code):
     """Scrape the desktop ETF info page for fields the mobile API lacks
-    (listing date, fund type/category). No auth required."""
+    (listing date, fund type/category, benchmark index). No auth required."""
     url = f"https://finance.naver.com/item/coinfo.naver?code={code}"
     try:
         r = requests.get(url, headers=HEADERS, timeout=8)
         r.raise_for_status()
-        text = r.content.decode("euc-kr", errors="replace")
+        text = _decode_naver_page(r)
     except requests.RequestException:
         return {}
     result = {}
-    m = re.search(r"상장일</th>\s*<td>([^<]+)</td>", text)
-    if m:
-        result["inceptionDate"] = parse_korean_date(m.group(1).strip())
-    m = re.search(r"유형</th>\s*<td><span[^>]*>([^<]+)</span></td>", text)
-    if m:
-        result["category"] = m.group(1).strip()
-    m = re.search(r"기초지수</th>\s*<td><span[^>]*>([^<]+)</span></td>", text)
-    if m:
-        result["benchmarkIndex"] = m.group(1).strip()
+    inception = _table_field(text, "상장일")
+    if inception:
+        result["inceptionDate"] = parse_korean_date(inception)
+    category = _table_field(text, "유형")
+    if category:
+        result["category"] = category
+    benchmark = _table_field(text, "기초지수")
+    if benchmark:
+        result["benchmarkIndex"] = benchmark
     return result
 
 
