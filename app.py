@@ -2199,12 +2199,24 @@ def _build_isin_reuters_map(krx_code):
         return {}
     mapping = {}
     for row in rows:
-        isin = row.get("componentIsinCode")
         reuters = row.get("componentReutersCode")
-        if isin and reuters:
+        if not reuters:
+            continue
+        isin = row.get("componentIsinCode")
+        if isin:
             mapping[isin] = reuters
+        # 점 앞부분(NVDA.O -> NVDA)을 정규화한 티커로도 등록해서,
+        # 운용사 PDF의 "NVDA US Equity" 같은 Bloomberg 코드에서 뽑은
+        # 티커로도 같은 매핑에서 바로 찾을 수 있게 한다.
+        bare_ticker = reuters.split(".")[0]
+        mapping[_normalize_ticker_key(bare_ticker)] = reuters
     return mapping
- 
+
+def _normalize_ticker_key(s):
+    """'BRK.B' 와 네이버가 주는 'BRKb' 처럼 표기가 달라도 같은 키로
+    묶이도록, 점/하이픈/공백을 지우고 대문자로 맞춘다."""
+    return re.sub(r"[.\-\s]", "", s or "").upper()
+
  
 def get_isin_reuters_map(krx_code):
     """Cached per-fund ISIN -> Reuters-code map, built from Naver's own
@@ -2265,11 +2277,17 @@ def enrich_holdings_with_market_cap(holdings, krx_code=None):
         else:
             m = _BLOOMBERG_US_EQUITY_RE.match(code)
             if m:
-                ticker = m.group(1).upper().replace(".", "-")
-                info = us_map.get(ticker)
+                bloomberg_ticker = m.group(1)
+                us_ticker_key = bloomberg_ticker.upper().replace(".", "-")
+                info = us_map.get(us_ticker_key)
                 if not info:
-                    fallback_indices[i] = ticker
-                    fallback_tickers.append(ticker)
+                    reuters_code = get_isin_reuters_map(krx_code).get(_normalize_ticker_key(bloomberg_ticker)) if krx_code else None
+                    if reuters_code:
+                        reuters_indices[i] = reuters_code
+                        reuters_codes.append(reuters_code)
+                    else:
+                        fallback_indices[i] = us_ticker_key
+                        fallback_tickers.append(us_ticker_key)
         h["market"] = info["market"] if info else None
         h["marketCap"] = info["marketCap"] if info else None
         h["marketCapRank"] = info["marketCapRank"] if info else None
