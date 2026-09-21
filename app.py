@@ -2077,7 +2077,7 @@ def get_us_exchange_map(tickers):
 # 2) 아래 블록 전체를 enrich_holdings_with_market_cap 함수
 #    "바로 위"에 새로 추가하세요.
 # ============================================================
-_REUTERS_CODE_RE = re.compile(r"^[A-Z0-9]{1,8}\.[A-Z]{1,3}$", re.I)
+_REUTERS_CODE_RE = re.compile(r"^(?:[A-Z][A-Z0-9]{0,7}|[A-Z0-9]{1,8}\.[A-Z0-9]{1,3})$", re.I)
 _NAVER_EXCHANGE_LABELS = {
     "NASDAQ": "나스닥",
     "NYSE": "NYSE",
