@@ -2073,7 +2073,85 @@ def get_us_exchange_map(tickers):
         threading.Thread(target=_background_fetch_us_exchanges, args=(to_fetch,), daemon=True).start()
     return cached
 
+# ============================================================
+# 2) 아래 블록 전체를 enrich_holdings_with_market_cap 함수
+#    "바로 위"에 새로 추가하세요.
+# ============================================================
+_REUTERS_CODE_RE = re.compile(r"^[A-Z][A-Z0-9]{0,5}\.[A-Z]{1,3}$", re.I)
+_NAVER_EXCHANGE_LABELS = {
+    "NASDAQ": "나스닥",
+    "NYSE": "NYSE",
+    "AMEX": "NYSE American",
+}
+_NAVER_WORLD_STOCK_CACHE_TTL = 24 * 3600
+_NAVER_WORLD_STOCK_FALLBACK_LIMIT = 15
+_naver_world_stock_cache = {}
+_naver_world_stock_pending = set()
+_naver_world_stock_lock = threading.Lock()
+ 
+ 
+def _fetch_naver_world_stock_basic(reuters_code):
+    """Exchange + market cap for a single overseas stock, keyed by its own
+    Reuters-style code (e.g. "NVDA.O") -- the same code Naver's own
+    ETF-holdings endpoint already returns for foreign holdings (see
+    fetch_kodex_holdings / fetch_naver_generic_holdings), so unlike the
+    Bloomberg-style "NVDA US Equity" codes from issuer PDFs below, no
+    exchange-suffix guessing is needed here."""
+    try:
+        r = requests.get(f"https://api.stock.naver.com/stock/{reuters_code}/basic", headers=HEADERS, timeout=8)
+        r.raise_for_status()
+        data = r.json() or {}
+    except (requests.RequestException, ValueError):
+        return None
+    exchange = (data.get("stockExchangeType") or {}).get("name")
+    market_cap = data.get("marketValueFullRaw")
+    if market_cap is None and not exchange:
+        return None
+    return {
+        "market": _NAVER_EXCHANGE_LABELS.get(exchange, exchange),
+        "marketCap": market_cap,
+        "marketCapRank": None,
+        "currency": "USD",
+    }
+ 
+ 
+def _background_fetch_naver_world_stocks(reuters_codes):
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+            results = dict(zip(reuters_codes, ex.map(_fetch_naver_world_stock_basic, reuters_codes)))
+        now = time.time()
+        with _naver_world_stock_lock:
+            for code, info in results.items():
+                _naver_world_stock_cache[code] = {"info": info, "fetched_at": now}
+    finally:
+        with _naver_world_stock_lock:
+            _naver_world_stock_pending.difference_update(reuters_codes)
+ 
+ 
+def get_naver_world_stock_map(reuters_codes):
+    """Non-blocking, same shape as get_us_exchange_map below: returns
+    whatever is already cached for these codes, and kicks off a capped
+    background fetch for the rest so a holdings view is never blocked
+    on it."""
+    now = time.time()
+    with _naver_world_stock_lock:
+        cached = {
+            c: v["info"]
+            for c, v in _naver_world_stock_cache.items()
+            if c in reuters_codes and v["info"] is not None and now - v["fetched_at"] < _NAVER_WORLD_STOCK_CACHE_TTL
+        }
+        candidates = [c for c in reuters_codes if c not in cached and c not in _naver_world_stock_pending]
+        to_fetch = candidates[:_NAVER_WORLD_STOCK_FALLBACK_LIMIT]
+        _naver_world_stock_pending.update(to_fetch)
+    if to_fetch:
+        threading.Thread(target=_background_fetch_naver_world_stocks, args=(to_fetch,), daemon=True).start()
+    return cached
 
+
+# ============================================================
+# 3) enrich_holdings_with_market_cap 함수 자체는 아래 내용으로
+#    통째로 교체하세요.
+# ============================================================
 def enrich_holdings_with_market_cap(holdings):
     try:
         kr_map = fetch_market_cap_map()
@@ -2083,13 +2161,25 @@ def enrich_holdings_with_market_cap(holdings):
         us_map = fetch_us_market_cap_map()
     except requests.RequestException:
         us_map = {}
-
+ 
     fallback_tickers = []
     fallback_indices = {}
+    reuters_codes = []
+    reuters_indices = {}
+ 
     for i, h in enumerate(holdings):
         code = h.get("code") or ""
         info = kr_map.get(code)
-        if not info:
+        if not info and _REUTERS_CODE_RE.match(code):
+            # Holdings that came from Naver's own ETF-holdings endpoint
+            # (fetch_kodex_holdings / fetch_naver_generic_holdings) carry
+            # this exact Reuters code for foreign names -- resolve those
+            # directly via Naver's worldstock API instead of falling
+            # through to the Bloomberg-style branch below, which doesn't
+            # apply here.
+            reuters_indices[i] = code
+            reuters_codes.append(code)
+        elif not info:
             m = _BLOOMBERG_US_EQUITY_RE.match(code)
             if m:
                 ticker = m.group(1).upper().replace(".", "-")
@@ -2101,12 +2191,22 @@ def enrich_holdings_with_market_cap(holdings):
         h["marketCap"] = info["marketCap"] if info else None
         h["marketCapRank"] = info["marketCapRank"] if info else None
         h["currency"] = info.get("currency", "KRW") if info else None
-
+ 
+    if reuters_codes:
+        world_map = get_naver_world_stock_map(reuters_codes)
+        for i, code in reuters_indices.items():
+            info = world_map.get(code)
+            if info:
+                holdings[i]["market"] = info["market"]
+                holdings[i]["marketCap"] = info["marketCap"]
+                holdings[i]["marketCapRank"] = info["marketCapRank"]
+                holdings[i]["currency"] = info["currency"]
+ 
     if fallback_tickers:
         # holdings are weight-sorted by every source, so fallback_tickers
-        # already lists the most-viewed names first — that ordering is what
-        # get_us_exchange_map uses to decide which uncached tickers to fetch
-        # first when it throttles new lookups (see its docstring).
+        # already lists the most-viewed names first -- that ordering is
+        # what get_us_exchange_map uses to decide which uncached tickers
+        # to fetch first when it throttles new lookups (see its docstring).
         exchange_map = get_us_exchange_map(fallback_tickers)
         for i, ticker in fallback_indices.items():
             exchange = exchange_map.get(ticker)
@@ -2114,6 +2214,7 @@ def enrich_holdings_with_market_cap(holdings):
                 holdings[i]["market"] = _YAHOO_EXCHANGE_LABELS.get(exchange, exchange)
                 holdings[i]["currency"] = "USD"
     return holdings
+ 
 
 
 _ace_ticker_map_cache = {"map": {}, "fetched_at": 0}
