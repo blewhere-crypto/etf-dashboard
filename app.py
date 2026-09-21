@@ -2077,7 +2077,7 @@ def get_us_exchange_map(tickers):
 # 2) 아래 블록 전체를 enrich_holdings_with_market_cap 함수
 #    "바로 위"에 새로 추가하세요.
 # ============================================================
-_REUTERS_CODE_RE = re.compile(r"^[A-Z][A-Z0-9]{0,5}\.[A-Z]{1,3}$", re.I)
+_REUTERS_CODE_RE = re.compile(r"^[A-Z0-9]{1,8}\.[A-Z]{1,3}$", re.I)
 _NAVER_EXCHANGE_LABELS = {
     "NASDAQ": "나스닥",
     "NYSE": "NYSE",
@@ -2090,13 +2090,36 @@ _naver_world_stock_pending = set()
 _naver_world_stock_lock = threading.Lock()
  
  
+# ---- 3) _fetch_naver_world_stock_basic 교체 ----
+# 통화를 "USD"로 고정하지 않고 실제 응답값을 쓴다. currencyType의 정확한
+# 형태(문자열/객체)가 종목마다 다를 수 있어 방어적으로 처리하고,
+# 그래도 못 얻으면 거래소 국가로 대략 추정한다.
+_EXCHANGE_CURRENCY_FALLBACK = {
+    "NASDAQ": "USD",
+    "NYSE": "USD",
+    "AMEX": "USD",
+    "TSE": "JPY",
+    "TYO": "JPY",
+}
+ 
+ 
+def _extract_currency(data):
+    raw = data.get("currencyType")
+    if isinstance(raw, str) and raw:
+        return raw.upper()
+    if isinstance(raw, dict):
+        for key in ("code", "currencyCode", "text", "name"):
+            v = raw.get(key)
+            if isinstance(v, str) and v:
+                return v.upper()
+    exchange = (data.get("stockExchangeType") or {}).get("name")
+    return _EXCHANGE_CURRENCY_FALLBACK.get(exchange)
+ 
+ 
 def _fetch_naver_world_stock_basic(reuters_code):
     """Exchange + market cap for a single overseas stock, keyed by its own
-    Reuters-style code (e.g. "NVDA.O") -- the same code Naver's own
-    ETF-holdings endpoint already returns for foreign holdings (see
-    fetch_kodex_holdings / fetch_naver_generic_holdings), so unlike the
-    Bloomberg-style "NVDA US Equity" codes from issuer PDFs below, no
-    exchange-suffix guessing is needed here."""
+    Reuters-style code (e.g. "NVDA.O", "8035.T") -- the same code Naver's
+    own ETF-holdings endpoint already returns for foreign holdings."""
     try:
         r = requests.get(f"https://api.stock.naver.com/stock/{reuters_code}/basic", headers=HEADERS, timeout=8)
         r.raise_for_status()
@@ -2111,7 +2134,7 @@ def _fetch_naver_world_stock_basic(reuters_code):
         "market": _NAVER_EXCHANGE_LABELS.get(exchange, exchange),
         "marketCap": market_cap,
         "marketCapRank": None,
-        "currency": "USD",
+        "currency": _extract_currency(data) or "USD",
     }
  
  
@@ -2147,12 +2170,73 @@ def get_naver_world_stock_map(reuters_codes):
         threading.Thread(target=_background_fetch_naver_world_stocks, args=(to_fetch,), daemon=True).start()
     return cached
 
+    # ---- 2) 새로 추가: ISIN 형식 감지 ----
+# ISO 6166 ISIN: 2자리 국가코드 + 9자리 영숫자 + 1자리 체크디지트.
+# 일부 운용사(SOL 등)는 자체 PDF에 해외 종목을 Bloomberg 코드나 Reuters
+# 코드가 아니라 이 ISIN으로 표기한다 -- Naver의 ETFComponent가 같은
+# 종목에 대해 componentIsinCode/componentReutersCode를 나란히 주므로,
+# 그 매핑을 별도로 가져와 ISIN -> Reuters코드로 변환한 뒤 재사용한다.
+_ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
+ 
+_ISIN_REUTERS_MAP_CACHE_TTL = 3600
+_isin_reuters_map_cache = {}
+_isin_reuters_map_lock = threading.Lock()
+ 
+ 
+def _build_isin_reuters_map(krx_code):
+    try:
+        r = requests.get(
+            f"https://stock.naver.com/api/domestic/detail/{krx_code}/ETFComponent",
+            headers=HEADERS,
+            params={"startIdx": 0, "pageSize": 1000},
+            timeout=15,
+        )
+        r.raise_for_status()
+        rows = r.json()
+    except (requests.RequestException, ValueError):
+        return {}
+    if not isinstance(rows, list):
+        return {}
+    mapping = {}
+    for row in rows:
+        isin = row.get("componentIsinCode")
+        reuters = row.get("componentReutersCode")
+        if isin and reuters:
+            mapping[isin] = reuters
+    return mapping
+ 
+ 
+def get_isin_reuters_map(krx_code):
+    """Cached per-fund ISIN -> Reuters-code map, built from Naver's own
+    ETF-holdings endpoint for this same krx_code. Used to resolve foreign
+    holdings that an issuer's own PDF lists by ISIN (confirmed for SOL)
+    rather than by a Bloomberg or Reuters ticker, regardless of which
+    issuer-specific scraper actually supplied the holdings list -- this
+    lookup runs independently of that."""
+    now = time.time()
+    entry = _isin_reuters_map_cache.get(krx_code)
+    if entry and now - entry["fetched_at"] < _ISIN_REUTERS_MAP_CACHE_TTL:
+        return entry["map"]
+    with _isin_reuters_map_lock:
+        entry = _isin_reuters_map_cache.get(krx_code)
+        if entry and now - entry["fetched_at"] < _ISIN_REUTERS_MAP_CACHE_TTL:
+            return entry["map"]
+        new_map = _build_isin_reuters_map(krx_code)
+        _isin_reuters_map_cache[krx_code] = {
+            "map": new_map,
+            # An empty map is ambiguous (genuinely no foreign holdings vs.
+            # a transient fetch failure) -- same reasoning as the other
+            # caches in this app: give it a short retry instead of the
+            # full TTL so a blip doesn't strand ISIN resolution for an hour.
+            "fetched_at": now if new_map else now - (_ISIN_REUTERS_MAP_CACHE_TTL - 300),
+        }
+        return new_map
+ 
 
-# ============================================================
-# 3) enrich_holdings_with_market_cap 함수 자체는 아래 내용으로
-#    통째로 교체하세요.
-# ============================================================
-def enrich_holdings_with_market_cap(holdings):
+# ---- 4) enrich_holdings_with_market_cap 통째로 교체 ----
+# krx_code 인자가 추가됨: ISIN 코드가 하나라도 있을 때만 그 펀드용
+# ETFComponent를 한 번 더 불러 ISIN -> Reuters코드 매핑을 만든다.
+def enrich_holdings_with_market_cap(holdings, krx_code=None):
     try:
         kr_map = fetch_market_cap_map()
     except requests.RequestException:
@@ -2166,20 +2250,19 @@ def enrich_holdings_with_market_cap(holdings):
     fallback_indices = {}
     reuters_codes = []
     reuters_indices = {}
+    isin_indices = {}
  
     for i, h in enumerate(holdings):
         code = h.get("code") or ""
         info = kr_map.get(code)
-        if not info and _REUTERS_CODE_RE.match(code):
-            # Holdings that came from Naver's own ETF-holdings endpoint
-            # (fetch_kodex_holdings / fetch_naver_generic_holdings) carry
-            # this exact Reuters code for foreign names -- resolve those
-            # directly via Naver's worldstock API instead of falling
-            # through to the Bloomberg-style branch below, which doesn't
-            # apply here.
+        if info:
+            pass
+        elif _REUTERS_CODE_RE.match(code):
             reuters_indices[i] = code
             reuters_codes.append(code)
-        elif not info:
+        elif _ISIN_RE.match(code) and krx_code:
+            isin_indices[i] = code
+        else:
             m = _BLOOMBERG_US_EQUITY_RE.match(code)
             if m:
                 ticker = m.group(1).upper().replace(".", "-")
@@ -2192,6 +2275,14 @@ def enrich_holdings_with_market_cap(holdings):
         h["marketCapRank"] = info["marketCapRank"] if info else None
         h["currency"] = info.get("currency", "KRW") if info else None
  
+    if isin_indices:
+        isin_map = get_isin_reuters_map(krx_code)
+        for i, isin in isin_indices.items():
+            reuters_code = isin_map.get(isin)
+            if reuters_code:
+                reuters_indices[i] = reuters_code
+                reuters_codes.append(reuters_code)
+ 
     if reuters_codes:
         world_map = get_naver_world_stock_map(reuters_codes)
         for i, code in reuters_indices.items():
@@ -2203,10 +2294,6 @@ def enrich_holdings_with_market_cap(holdings):
                 holdings[i]["currency"] = info["currency"]
  
     if fallback_tickers:
-        # holdings are weight-sorted by every source, so fallback_tickers
-        # already lists the most-viewed names first -- that ordering is
-        # what get_us_exchange_map uses to decide which uncached tickers
-        # to fetch first when it throttles new lookups (see its docstring).
         exchange_map = get_us_exchange_map(fallback_tickers)
         for i, ticker in fallback_indices.items():
             exchange = exchange_map.get(ticker)
@@ -2767,7 +2854,7 @@ def api_holdings(symbol):
     # result — see the comment in fetch_etf_holdings) so it reflects
     # whatever the separately-warming market-cap caches have *right now*,
     # including right after the user hits the manual refresh button.
-    data["holdings"] = enrich_holdings_with_market_cap(data["holdings"])
+    data["holdings"] = enrich_holdings_with_market_cap(data["holdings"], symbol)
     return jsonify(data)
 
 
