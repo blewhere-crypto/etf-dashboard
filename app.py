@@ -1589,7 +1589,7 @@ def fetch_kodex_holdings(krx_code):
             weight = None
         holdings.append(
             {
-                "code": row.get("componentItemCode"),
+                "code": row.get("componentItemCode") or row.get("componentReutersCode"),
                 "name": row.get("componentName"),
                 "weight": weight,
             }
