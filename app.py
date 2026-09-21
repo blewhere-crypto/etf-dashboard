@@ -2473,18 +2473,76 @@ _HOLDINGS_FETCHERS = (
 )
 
 
+def fetch_naver_generic_holdings(krx_code):
+    """Fallback holdings source for any domestic ETF, used only when none
+    of the issuer-specific scrapers above succeed.
+
+    Unlike those scrapers, this doesn't need an issuer check, a ticker
+    map, or any internal id -- Naver's own per-ETF holdings endpoint is
+    keyed directly by the plain KRX code, so it works the same way for a
+    KODEX, SOL, TIGER, or any other domestic ETF. That also makes it
+    resilient to exactly the kind of breakage this app has hit before:
+    it doesn't depend on any single issuer site's markup, API shape, or
+    even uptime staying the same.
+
+    pageSize=1000 in one request rather than paging, for the same reason
+    as fetch_kodex_holdings: even broad-market domestic ETFs stay well
+    under that many constituents, and each row's own componentCount field
+    reports the fund's true total if that assumption ever needs revisiting.
+    """
+    try:
+        r = requests.get(
+            f"https://stock.naver.com/api/domestic/detail/{krx_code}/ETFComponent",
+            headers=HEADERS,
+            params={"startIdx": 0, "pageSize": 1000},
+            timeout=15,
+        )
+        r.raise_for_status()
+        rows = r.json()
+    except (requests.RequestException, ValueError):
+        return None
+    if not isinstance(rows, list) or not rows:
+        return None
+    holdings = []
+    as_of = None
+    for row in rows:
+        weight = row.get("weight")
+        try:
+            weight = float(weight) if weight not in (None, "") else None
+        except (ValueError, TypeError):
+            weight = None
+        holdings.append(
+            {
+                "code": row.get("componentItemCode"),
+                "name": row.get("componentName"),
+                "weight": weight,
+            }
+        )
+        if as_of is None:
+            as_of = row.get("referenceDate")
+    return {"holdings": holdings, "asOfDate": as_of}
+
+
 def fetch_etf_holdings(krx_code):
     """A given ticker only ever belongs to one issuer, so at most one of
-    these calls does real work — trying them one at a time in a fixed order
+    these calls does real work -- trying them one at a time in a fixed order
     meant a slow-but-eventually-failing issuer earlier in the list (KODEX's
     ticker map alone is ~12 requests) could delay reaching the *correct*
     issuer later in the list by however long it took to give up. Confirmed
     in production: a real KIWOOM ticker resolved instantly called directly,
     but timed out through the sequential chain while KODEX was degraded.
     Run all of them concurrently instead and take whichever succeeds
-    first — this already only ever runs on a background thread (see
+    first -- this already only ever runs on a background thread (see
     get_etf_holdings_cached below), so the extra thread pool isn't blocking
-    anything."""
+    anything.
+
+    If none of the issuer-specific scrapers recognize this ticker (or they
+    all happen to fail transiently at once), fall back to Naver's own
+    generic per-ETF holdings endpoint before giving up -- see
+    fetch_naver_generic_holdings above. This is deliberately a fallback,
+    not part of the concurrent race: it only runs after every dedicated
+    scraper has already had its chance, so a working issuer-specific
+    result (and its own as-of date) still wins when one succeeds."""
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=len(_HOLDINGS_FETCHERS))
     try:
         futures = [ex.submit(f, krx_code) for f in _HOLDINGS_FETCHERS]
@@ -2496,7 +2554,7 @@ def fetch_etf_holdings(krx_code):
                 # these issuer-site scrapers call r.json() on responses that
                 # aren't guaranteed to actually be JSON (a WAF/block page, a
                 # changed response shape, etc. would raise
-                # JSONDecodeError/ValueError, not a requests error) —
+                # JSONDecodeError/ValueError, not a requests error) --
                 # confirmed in production as a real 500 for KIWOOM
                 # specifically. One fetcher's failure shouldn't crash the
                 # whole lookup or stop the rest from being tried.
@@ -2505,7 +2563,7 @@ def fetch_etf_holdings(krx_code):
                 # Most sources already return weight-descending order, but
                 # not guaranteed for all of them (and the US-exchange
                 # enrichment fallback relies on that ordering to prioritize
-                # which holdings it looks up first) — sort explicitly so
+                # which holdings it looks up first) -- sort explicitly so
                 # it's always true regardless of source. Cash-like rows
                 # with no weight sink to the bottom instead of interleaving
                 # with real ones.
@@ -2513,7 +2571,7 @@ def fetch_etf_holdings(krx_code):
                 # Deliberately NOT enriching with market/market-cap here:
                 # this function's result is what gets cached (see
                 # get_etf_holdings_cached below), and market-cap enrichment
-                # has its own, separately-warming cache — baking enrichment
+                # has its own, separately-warming cache -- baking enrichment
                 # in here would freeze in whatever it happened to have
                 # (often nothing, on a cold cache) for the holdings cache's
                 # full TTL. Enrichment is applied fresh on every response
@@ -2522,6 +2580,14 @@ def fetch_etf_holdings(krx_code):
                 return data
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
+
+    try:
+        data = fetch_naver_generic_holdings(krx_code)
+    except Exception:
+        data = None
+    if data is not None:
+        data["holdings"].sort(key=lambda h: h.get("weight") if h.get("weight") is not None else -1, reverse=True)
+        return data
     return None
 
 
