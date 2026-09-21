@@ -1526,37 +1526,77 @@ def fetch_kodex_ticker_map():
     return _get_cached_ticker_map(_kodex_ticker_map_cache, _KODEX_TICKER_MAP_TTL_SECONDS, _build_kodex_ticker_map)
 
 
-def fetch_kodex_holdings(krx_code):
-    """Return {"holdings": [...], "asOfDate": "..."} for a KODEX ETF, or
-    None if krx_code isn't a KODEX-branded fund."""
+def _is_kodex_fund(krx_code):
+    """True if `krx_code` is issued by Samsung Asset Management (KODEX).
+
+    Uses the same m.stock.naver.com integration endpoint the app already
+    calls elsewhere (see fetch_domestic_quote) rather than samsungfund.com,
+    so this gate no longer depends on the fragile ticker-map pagination.
+    """
     try:
-        ticker_map = fetch_kodex_ticker_map()
-    except requests.RequestException:
+        r = requests.get(
+            f"https://m.stock.naver.com/api/stock/{krx_code}/integration",
+            headers=HEADERS,
+            timeout=8,
+        )
+        r.raise_for_status()
+        issuer = ((r.json() or {}).get("etfKeyIndicator") or {}).get("issuerName") or ""
+    except (requests.RequestException, ValueError):
+        return False
+    return "삼성자산운용" in issuer
+
+
+def fetch_kodex_holdings(krx_code):
+    """Return holdings for a KODEX (삼성자산운용) ETF, or None if krx_code
+    isn't one of theirs.
+
+    Previously resolved krx_code -> Samsung's internal fund id via a
+    paginated listing on m.samsungfund.com (see fetch_kodex_ticker_map),
+    then fetched that fund's holdings from the same site. That ticker-map
+    build turned out to be unreliable in production, so this now goes
+    through Naver's own per-ETF holdings endpoint instead
+    (stock.naver.com/api/domestic/detail/{code}/ETFComponent), keyed
+    directly by the KRX code -- no intermediate id or ticker map needed.
+
+    pageSize=1000 is a single generous request rather than paging, since
+    even broad-market domestic ETFs top out well under that many
+    constituents; each row's own `componentCount` field reports the fund's
+    true total; if a fund large enough to exceed 1000 pops up, follow up
+    with a second call at pageSize=componentCount.
+    """
+    if not _is_kodex_fund(krx_code):
         return None
-    fund_id = ticker_map.get(krx_code)
-    if not fund_id:
+    try:
+        r = requests.get(
+            f"https://stock.naver.com/api/domestic/detail/{krx_code}/ETFComponent",
+            headers=HEADERS,
+            params={"startIdx": 0, "pageSize": 1000},
+            timeout=15,
+        )
+        r.raise_for_status()
+        rows = r.json()
+    except (requests.RequestException, ValueError):
         return None
-    r = requests.get(f"https://m.samsungfund.com/api/v1/kodex/product/{fund_id}.do", headers=KODEX_HEADERS, timeout=15)
-    r.raise_for_status()
-    pdf = (r.json() or {}).get("pdf") or {}
+    if not isinstance(rows, list) or not rows:
+        return None
     holdings = []
-    for item in pdf.get("list") or []:
-        weight = item.get("ratio")
+    as_of = None
+    for row in rows:
+        weight = row.get("weight")
         try:
             weight = float(weight) if weight not in (None, "") else None
-        except ValueError:
+        except (ValueError, TypeError):
             weight = None
         holdings.append(
             {
-                "code": item.get("itmNo"),
-                "name": item.get("secNm"),
+                "code": row.get("componentItemCode"),
+                "name": row.get("componentName"),
                 "weight": weight,
             }
         )
-    return {
-        "holdings": holdings,
-        "asOfDate": parse_kofia_date(pdf.get("gijunYMD")),
-    }
+        if as_of is None:
+            as_of = row.get("referenceDate")
+    return {"holdings": holdings, "asOfDate": as_of}
 
 
 _sol_ticker_map_cache = {"map": {}, "fetched_at": 0}
