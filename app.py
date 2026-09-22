@@ -2731,63 +2731,17 @@ def fetch_naver_generic_holdings(krx_code):
 
 
 def fetch_etf_holdings(krx_code):
-    """A given ticker only ever belongs to one issuer, so at most one of
-    these calls does real work -- trying them one at a time in a fixed order
-    meant a slow-but-eventually-failing issuer earlier in the list (KODEX's
-    ticker map alone is ~12 requests) could delay reaching the *correct*
-    issuer later in the list by however long it took to give up. Confirmed
-    in production: a real KIWOOM ticker resolved instantly called directly,
-    but timed out through the sequential chain while KODEX was degraded.
-    Run all of them concurrently instead and take whichever succeeds
-    first -- this already only ever runs on a background thread (see
-    get_etf_holdings_cached below), so the extra thread pool isn't blocking
-    anything.
-
-    If none of the issuer-specific scrapers recognize this ticker (or they
-    all happen to fail transiently at once), fall back to Naver's own
-    generic per-ETF holdings endpoint before giving up -- see
-    fetch_naver_generic_holdings above. This is deliberately a fallback,
-    not part of the concurrent race: it only runs after every dedicated
-    scraper has already had its chance, so a working issuer-specific
-    result (and its own as-of date) still wins when one succeeds."""
-    ex = concurrent.futures.ThreadPoolExecutor(max_workers=len(_HOLDINGS_FETCHERS))
-    try:
-        futures = [ex.submit(f, krx_code) for f in _HOLDINGS_FETCHERS]
-        for fut in concurrent.futures.as_completed(futures):
-            try:
-                data = fut.result()
-            except Exception:
-                # Broad on purpose (not just requests.RequestException):
-                # these issuer-site scrapers call r.json() on responses that
-                # aren't guaranteed to actually be JSON (a WAF/block page, a
-                # changed response shape, etc. would raise
-                # JSONDecodeError/ValueError, not a requests error) --
-                # confirmed in production as a real 500 for KIWOOM
-                # specifically. One fetcher's failure shouldn't crash the
-                # whole lookup or stop the rest from being tried.
-                continue
-            if data is not None:
-                # Most sources already return weight-descending order, but
-                # not guaranteed for all of them (and the US-exchange
-                # enrichment fallback relies on that ordering to prioritize
-                # which holdings it looks up first) -- sort explicitly so
-                # it's always true regardless of source. Cash-like rows
-                # with no weight sink to the bottom instead of interleaving
-                # with real ones.
-                #
-                # Deliberately NOT enriching with market/market-cap here:
-                # this function's result is what gets cached (see
-                # get_etf_holdings_cached below), and market-cap enrichment
-                # has its own, separately-warming cache -- baking enrichment
-                # in here would freeze in whatever it happened to have
-                # (often nothing, on a cold cache) for the holdings cache's
-                # full TTL. Enrichment is applied fresh on every response
-                # instead, in api_holdings.
-                data["holdings"].sort(key=lambda h: h.get("weight") if h.get("weight") is not None else -1, reverse=True)
-                return data
-    finally:
-        ex.shutdown(wait=False, cancel_futures=True)
-
+    """Naver's own ETF-holdings endpoint first, for every domestic ETF
+    regardless of issuer -- one code path, one code format
+    (componentItemCode/componentReutersCode), so the market-cap
+    enrichment above almost never needs its ISIN/Bloomberg-ticker
+    fallback branches in practice.
+ 
+    Only when Naver itself fails (or doesn't recognize the ticker) do we
+    fall back to the issuer-specific scrapers, run concurrently and
+    taking whichever succeeds first -- kept as a safety net rather than
+    removed, so a Naver outage or an obscure fund it doesn't cover
+    doesn't take holdings down entirely."""
     try:
         data = fetch_naver_generic_holdings(krx_code)
     except Exception:
@@ -2795,6 +2749,20 @@ def fetch_etf_holdings(krx_code):
     if data is not None:
         data["holdings"].sort(key=lambda h: h.get("weight") if h.get("weight") is not None else -1, reverse=True)
         return data
+ 
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=len(_HOLDINGS_FETCHERS))
+    try:
+        futures = [ex.submit(f, krx_code) for f in _HOLDINGS_FETCHERS]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                data = fut.result()
+            except Exception:
+                continue
+            if data is not None:
+                data["holdings"].sort(key=lambda h: h.get("weight") if h.get("weight") is not None else -1, reverse=True)
+                return data
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
     return None
 
 
