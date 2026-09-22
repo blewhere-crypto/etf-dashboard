@@ -2118,8 +2118,7 @@ def _extract_currency(data):
  
 def _fetch_naver_world_stock_basic(reuters_code):
     """Exchange + market cap for a single overseas stock, keyed by its own
-    Reuters-style code (e.g. "NVDA.O", "8035.T") -- the same code Naver's
-    own ETF-holdings endpoint already returns for foreign holdings."""
+    Reuters-style code (e.g. "NVDA.O", "8035.T", "JPM")."""
     try:
         r = requests.get(f"https://api.stock.naver.com/stock/{reuters_code}/basic", headers=HEADERS, timeout=8)
         r.raise_for_status()
@@ -2133,10 +2132,10 @@ def _fetch_naver_world_stock_basic(reuters_code):
     return {
         "market": _NAVER_EXCHANGE_LABELS.get(exchange, exchange),
         "marketCap": market_cap,
+        "marketCapKrw": data.get("marketValueKrwRaw"),
         "marketCapRank": None,
         "currency": _extract_currency(data) or "USD",
     }
- 
  
 def _background_fetch_naver_world_stocks(reuters_codes):
     try:
@@ -2292,6 +2291,7 @@ def enrich_holdings_with_market_cap(holdings, krx_code=None):
         h["marketCap"] = info["marketCap"] if info else None
         h["marketCapRank"] = info["marketCapRank"] if info else None
         h["currency"] = info.get("currency", "KRW") if info else None
+        h["marketCapKrw"] = info.get("marketCapKrw") if info else None
  
     if isin_indices:
         isin_map = get_isin_reuters_map(krx_code)
@@ -2310,6 +2310,7 @@ def enrich_holdings_with_market_cap(holdings, krx_code=None):
                 holdings[i]["marketCap"] = info["marketCap"]
                 holdings[i]["marketCapRank"] = info["marketCapRank"]
                 holdings[i]["currency"] = info["currency"]
+                holdings[i]["marketCapKrw"] = info.get("marketCapKrw")
  
     if fallback_tickers:
         exchange_map = get_us_exchange_map(fallback_tickers)
