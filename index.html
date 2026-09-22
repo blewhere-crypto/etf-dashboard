@@ -622,7 +622,7 @@ async function loadHoldings(symbol, opts = {}) {
               <td>${h.name || '-'}</td>
               <td>${h.code || '-'}</td>
               <td>${h.weight != null ? h.weight.toFixed(2) + '%' : '-'}</td>
-              <td>${h.marketCap != null ? fmtAssets(h.marketCap, h.currency || 'KRW') : '-'}</td>
+                <td>${h.marketCap != null ? fmtAssets(h.marketCap, h.currency || 'KRW') + (h.marketCapKrw != null && h.currency && h.currency !== 'KRW' ? `<br><span style="font-size:11px;color:var(--text-muted);">(${fmtAssets(h.marketCapKrw, 'KRW')})</span>` : '') : '-'}</td>
               <td>${h.market ? `<span class="market-tag ${marketTagClass(h.market)}">${h.market}</span>` : '-'}</td>
               <td>${h.marketCapRank != null ? h.marketCapRank + '위' : '-'}</td>
             </tr>
