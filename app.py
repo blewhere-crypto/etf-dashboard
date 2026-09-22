@@ -5,7 +5,7 @@ import re
 import statistics
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import truststore
 
@@ -1087,7 +1087,7 @@ def fetch_domestic_quote(code):
         "benchmarkVar975": benchmark_var975,
         "benchmarkVar975Period": format_period_label(benchmark_volatility_days),
         "hasData": price is not None,
-        "updatedAt": datetime.now().isoformat(),
+       "updatedAt": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -1221,7 +1221,7 @@ def fetch_quote(symbol):
         "benchmarkVar975": None,
         "benchmarkVar975Period": None,
         "hasData": True,
-        "updatedAt": datetime.now().isoformat(),
+       "updatedAt": datetime.now(timezone.utc).isoformat(),
     }
 
 
