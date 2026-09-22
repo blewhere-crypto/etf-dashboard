@@ -614,16 +614,16 @@ async function loadHoldings(symbol, opts = {}) {
         <button type="button" id="holdingsRefreshBtn" class="holdings-refresh-btn" title="시장·시가총액 다시 불러오기">↻ 새로고침</button>
       </div>
       <div class="holdings-table-scroll">
-       <table class="holdings-table">
-        <thead><tr><th>종목명</th><th>코드</th><th>비중</th><th>시장</th><th>시가총액</th><th>시총순위</th></tr></thead>
+        <table class="holdings-table">
+        <thead><tr><th>종목명</th><th>코드</th><th>비중</th><th>시가총액</th><th>시장</th><th>시총순위</th></tr></thead>
         <tbody>
           ${r.holdings.map(h => `
             <tr>
-              <td title="${h.name || ''}">${h.name || '-'}</td>
+              <td>${h.name || '-'}</td>
               <td>${h.code || '-'}</td>
               <td>${h.weight != null ? h.weight.toFixed(2) + '%' : '-'}</td>
-              <td>${h.market ? `<span class="market-tag ${marketTagClass(h.market)}">${h.market}</span>` : '-'}</td>
               <td>${h.marketCap != null ? fmtAssets(h.marketCap, h.currency || 'KRW') : '-'}</td>
+              <td>${h.market ? `<span class="market-tag ${marketTagClass(h.market)}">${h.market}</span>` : '-'}</td>
               <td>${h.marketCapRank != null ? h.marketCapRank + '위' : '-'}</td>
             </tr>
           `).join('')}
