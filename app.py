@@ -440,7 +440,7 @@ def resolve_domestic_index_code(benchmark_name):
     if not normalized:
         return None
     for key in sorted(DOMESTIC_INDEX_CODES, key=len, reverse=True):
-        if _compact(key) in normalized:
+        if _compact(key) == normalized:
             return DOMESTIC_INDEX_CODES[key]
     return None
 
