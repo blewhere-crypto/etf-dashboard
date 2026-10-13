@@ -1018,14 +1018,95 @@ KRX_CUSTOM_INDEX_IDS = {
 }
  
  
+def fetch_krx_index_category(idx_upclss_cd, idx_midclss_cd):
+    """특정 대분류/중분류 조합에 속한 지수 목록을 한 번에 가져온다.
+    존재하지 않는 조합은 그냥 빈 리스트를 돌려준다."""
+    bld = "/IDX/03/0304/03040100/mkd03040100"
+    form = {
+        "idx_upclss_cd": idx_upclss_cd,
+        "idx_midclss_cd": idx_midclss_cd,
+        "lang": "ko",
+        "bz_dd": datetime.now().strftime("%Y%m%d"),
+    }
+    otp = fetch_krx_otp(bld, form)
+    form["code"] = otp
+    r = requests.post(
+        "https://index.krx.co.kr/contents/IDX/99/IDX99000001.jspx",
+        data=form,
+        headers=HEADERS,
+        timeout=15,
+    )
+    r.raise_for_status()
+    return (r.json() or {}).get("output") or []
+ 
+ 
+# 대분류 01~09, 중분류 01~20 조합을 훑는다. 실제로 쓰이는 범위를
+# 정확히 몰라서 넉넉하게 잡았다 -- 없는 조합은 그냥 빈 목록이라
+# 안전하고, 이 전수조사는 백그라운드에서 1회(주 단위 캐시)만 돈다.
+_KRX_CATEGORY_RANGE = [(f"{u:02d}", f"{m:02d}") for u in range(1, 10) for m in range(1, 21)]
+ 
+_krx_index_catalog_cache = {"map": {}, "fetched_at": 0, "building": False}
+_krx_index_catalog_lock = threading.Lock()
+_KRX_INDEX_CATALOG_TTL_SECONDS = 7 * 24 * 3600
+_KRX_INDEX_CATALOG_FAILURE_RETRY_SECONDS = 3600
+ 
+ 
+def _build_krx_index_catalog_cache():
+    """카테고리 조합들을 병렬로 돌면서 '지수명(정규화) -> (idx_cd,
+    ind_tp_cd, idx_ind_cd)' 전체 매핑을 만든다. 이 앱의 다른 무거운
+    카탈로그 빌더들(FnGuide/WISE 이름 목록 등)과 같은 패턴 -- 한 번
+    빌드되면 오래 캐시해두고, 요청 경로에서는 절대 기다리지 않는다."""
+    got_data = False
+    try:
+        mapping = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            futures = {
+                ex.submit(fetch_krx_index_category, u, m): (u, m) for u, m in _KRX_CATEGORY_RANGE
+            }
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    rows = fut.result()
+                except requests.RequestException:
+                    continue
+                for row in rows:
+                    name = row.get("idx_nm")
+                    ind_tp_cd = row.get("ind_tp_cd")
+                    idx_ind_cd = row.get("idx_ind_cd")
+                    if name and ind_tp_cd and idx_ind_cd:
+                        idx_cd = f"{ind_tp_cd}{idx_ind_cd}"
+                        mapping[_compact(name)] = (idx_cd, ind_tp_cd, idx_ind_cd)
+        got_data = bool(mapping)
+        if got_data:
+            _krx_index_catalog_cache["map"] = mapping
+    finally:
+        now = time.time()
+        _krx_index_catalog_cache["fetched_at"] = (
+            now if got_data
+            else now - (_KRX_INDEX_CATALOG_TTL_SECONDS - _KRX_INDEX_CATALOG_FAILURE_RETRY_SECONDS)
+        )
+        _krx_index_catalog_cache["building"] = False
+ 
+ 
+def get_krx_index_catalog():
+    now = time.time()
+    cache = _krx_index_catalog_cache
+    is_stale = now - cache["fetched_at"] >= _KRX_INDEX_CATALOG_TTL_SECONDS
+    if is_stale and not cache["building"]:
+        with _krx_index_catalog_lock:
+            if not cache["building"]:
+                cache["building"] = True
+                threading.Thread(target=_build_krx_index_catalog_cache, daemon=True).start()
+    return cache["map"]
+ 
+ 
 def resolve_krx_custom_index(benchmark_name):
+    """지수명으로 (idx_cd, ind_tp_cd, idx_ind_cd)를 찾는다. 첫 배포
+    직후처럼 카탈로그가 아직 안 만들어졌을 때는 빈 매핑이 돌아오고,
+    그러면 호출부가 자연스럽게 다음 폴백(운용사 사이트)으로 넘어간다."""
     normalized = _compact(normalize_benchmark_name(benchmark_name))
     if not normalized:
         return None
-    for name, ids in KRX_CUSTOM_INDEX_IDS.items():
-        if _compact(normalize_benchmark_name(name)) == normalized:
-            return ids
-    return None
+    return get_krx_index_catalog().get(normalized)
  
 
 def fetch_benchmark_risk_stats(benchmark_name, krx_code=None, inception_date=None):
