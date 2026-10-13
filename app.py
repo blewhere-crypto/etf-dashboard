@@ -948,6 +948,85 @@ def get_issuer_benchmark_risk_stats_cached(krx_code, inception_date):
     entry = _issuer_benchmark_cache.get(krx_code)
     return entry["result"] if entry else (None, None, None)
 
+def fetch_krx_otp(bld, form):
+    """KRX 지수정보시스템(index.krx.co.kr)은 실제 데이터를 주기 전에
+    1회용 OTP 토큰을 먼저 발급받아야 한다. bld는 어떤 데이터 블록을
+    요청하는지 식별하는 값(페이지마다 다름), form은 그 블록이 필요로
+    하는 조회 조건(지수 코드, 기간 등)이다."""
+    params = {"bld": bld, "name": "form", **form}
+    r = requests.get(
+        "https://index.krx.co.kr/contents/COM/GenerateOTP.jspx",
+        params=params,
+        headers=HEADERS,
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.text.strip()
+ 
+ 
+def fetch_krx_index_daily_series(idx_cd, ind_tp_cd, idx_ind_cd, from_date, to_date):
+    """KRX 자체 산출 지수의 일별 종가 히스토리. OTP를 발급받은 뒤 같은
+    조건으로 IDX99000001.jspx에 POST하면 JSON으로 받는다."""
+    form = {
+        "idx_cd": idx_cd,
+        "ind_tp_cd": ind_tp_cd,
+        "idx_ind_cd": idx_ind_cd,
+        "add_data_yn": "",
+        "bz_dd": datetime.now().strftime("%Y%m%d"),
+        "indexname": "",
+        "chartType": "line",
+        "chartStandard": "srate",
+        "fromdate": from_date,
+        "todate": to_date,
+        "pagePath": "/contents/MKD/03/0304/03040101/MKD03040101T2.jsp",
+    }
+    otp = fetch_krx_otp("/IDX/03/0304/03040101/mkd03040101_02", form)
+    form["code"] = otp
+    r = requests.post(
+        "https://index.krx.co.kr/contents/IDX/99/IDX99000001.jspx",
+        data=form,
+        headers=HEADERS,
+        timeout=20,
+    )
+    r.raise_for_status()
+    return (r.json() or {}).get("output") or []
+ 
+ 
+def fetch_krx_index_risk_stats(idx_cd, ind_tp_cd, idx_ind_cd):
+    to_date = datetime.now().strftime("%Y%m%d")
+    from_date = (datetime.now() - timedelta(days=3 * 365 + 14)).strftime("%Y%m%d")
+    try:
+        rows = fetch_krx_index_daily_series(idx_cd, ind_tp_cd, idx_ind_cd, from_date, to_date)
+    except (requests.RequestException, ValueError):
+        return None, None, None
+    dates, closes = [], []
+    for row in rows:
+        d = row.get("trd_dd")
+        try:
+            dates.append(datetime.strptime(d, "%Y/%m/%d").date() if d else None)
+        except (ValueError, TypeError):
+            dates.append(None)
+        closes.append(num(row.get("clsprc_idx")))
+    return compute_risk_stats(dates, closes)
+ 
+ 
+# KRX 자체 산출 커스텀 지수 -- (idx_cd, ind_tp_cd, idx_ind_cd).
+# 지수명으로 자동 검색하는 방법(finder_equidx)은 확인 중이라, 확인된
+# 지수를 우선 여기에 하나씩 추가하는 방식이다.
+KRX_CUSTOM_INDEX_IDS = {
+    "코스피 200 금융 고배당 TOP 10 지수": (1359, 1, 359),
+}
+ 
+ 
+def resolve_krx_custom_index(benchmark_name):
+    normalized = _compact(normalize_benchmark_name(benchmark_name))
+    if not normalized:
+        return None
+    for name, ids in KRX_CUSTOM_INDEX_IDS.items():
+        if _compact(normalize_benchmark_name(name)) == normalized:
+            return ids
+    return None
+ 
 
 def fetch_benchmark_risk_stats(benchmark_name, krx_code=None, inception_date=None):
     domestic_code = resolve_domestic_index_code(benchmark_name)
@@ -962,6 +1041,7 @@ def fetch_benchmark_risk_stats(benchmark_name, krx_code=None, inception_date=Non
     wiseindex_code = resolve_wiseindex_code(benchmark_name)
     if wiseindex_code:
         return fetch_wiseindex_risk_stats(wiseindex_code)
+        
     if krx_code:
         return get_issuer_benchmark_risk_stats_cached(krx_code, inception_date)
     return None, None, None
