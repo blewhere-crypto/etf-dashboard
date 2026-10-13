@@ -1074,7 +1074,7 @@ def _build_krx_index_catalog_cache():
                     idx_ind_cd = row.get("idx_ind_cd")
                     if name and ind_tp_cd and idx_ind_cd:
                         idx_cd = f"{ind_tp_cd}{idx_ind_cd}"
-                        mapping[_compact(name)] = (idx_cd, ind_tp_cd, idx_ind_cd)
+                        mapping[_compact(normalize_benchmark_name(name))] = (idx_cd, ind_tp_cd, idx_ind_cd)
         got_data = bool(mapping)
         if got_data:
             _krx_index_catalog_cache["map"] = mapping
