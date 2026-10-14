@@ -1028,7 +1028,11 @@ def fetch_krx_index_daily_series(
         "/IDX/03/0304/03040101/mkd03040101_02",
         form,
     )
-
+    logger.info(
+        "[KRX-SERIES] otp=%s",
+        otp[:20] if otp else None,
+    )
+    
     form["code"] = otp
 
     logger.info(
@@ -1060,13 +1064,35 @@ logger.info(
     list(body.keys()),
 )
 
-if not body.get("output"):
-    logger.warning(
-        "[KRX-SERIES] empty_response=%s",
-        body,
-    )
-
 rows = body.get("output") or []
+
+if not rows:
+    safe_body = {}
+
+    for key, value in body.items():
+
+        if isinstance(value, list):
+            safe_body[key] = f"list(len={len(value)})"
+
+        elif isinstance(value, dict):
+            safe_body[key] = (
+                f"dict(keys={list(value.keys())[:10]})"
+            )
+
+        else:
+            safe_body[key] = value
+
+    logger.warning(
+        "[KRX-SERIES] EMPTY RESPONSE "
+        "idx_cd=%s "
+        "ind_tp_cd=%s "
+        "idx_ind_cd=%s "
+        "body=%s",
+        idx_cd,
+        ind_tp_cd,
+        idx_ind_cd,
+        safe_body,
+    )
 
     logger.info(
         "[KRX-SERIES] rows=%s",
