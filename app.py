@@ -1067,6 +1067,42 @@ logger.info(
 rows = body.get("output") or []
 
 if not rows:
+
+    safe_body = {}
+
+    for key, value in body.items():
+
+        if isinstance(value, list):
+            safe_body[key] = f"list(len={len(value)})"
+
+        elif isinstance(value, dict):
+            safe_body[key] = (
+                f"dict(keys={list(value.keys())[:10]})"
+            )
+
+        else:
+            safe_body[key] = value
+
+    logger.warning(
+        "[KRX-SERIES] EMPTY RESPONSE "
+        "idx_cd=%s "
+        "ind_tp_cd=%s "
+        "idx_ind_cd=%s "
+        "body=%s",
+        idx_cd,
+        ind_tp_cd,
+        idx_ind_cd,
+        safe_body,
+    )
+
+logger.info(
+    "[KRX-SERIES] response_keys=%s",
+    list(body.keys()),
+)
+
+rows = body.get("output") or []
+
+if not rows:
     safe_body = {}
 
     for key, value in body.items():
