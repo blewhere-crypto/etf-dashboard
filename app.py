@@ -1028,11 +1028,12 @@ def fetch_krx_index_daily_series(
         "/IDX/03/0304/03040101/mkd03040101_02",
         form,
     )
+
     logger.info(
         "[KRX-SERIES] otp=%s",
         otp[:20] if otp else None,
     )
-    
+
     form["code"] = otp
 
     logger.info(
@@ -1040,98 +1041,54 @@ def fetch_krx_index_daily_series(
     )
 
     r = requests.post(
-    "https://index.krx.co.kr/contents/IDX/99/IDX99000001.jspx",
-    data=form,
-    headers=HEADERS,
-    timeout=20,
-)
-
-r.raise_for_status()
-
- r = requests.post(
-    "https://index.krx.co.kr/contents/IDX/99/IDX99000001.jspx",
-    data=form,
-    headers=HEADERS,
-    timeout=20,
-)
-
-r.raise_for_status()
-
-body = r.json() or {}
-
-logger.info(
-    "[KRX-SERIES] response_keys=%s",
-    list(body.keys()),
-)
-
-rows = body.get("output") or []
-
-if not rows:
-
-    safe_body = {}
-
-    for key, value in body.items():
-
-        if isinstance(value, list):
-            safe_body[key] = f"list(len={len(value)})"
-
-        elif isinstance(value, dict):
-            safe_body[key] = (
-                f"dict(keys={list(value.keys())[:10]})"
-            )
-
-        else:
-            safe_body[key] = value
-
-    logger.warning(
-        "[KRX-SERIES] EMPTY RESPONSE "
-        "idx_cd=%s "
-        "ind_tp_cd=%s "
-        "idx_ind_cd=%s "
-        "body=%s",
-        idx_cd,
-        ind_tp_cd,
-        idx_ind_cd,
-        safe_body,
+        "https://index.krx.co.kr/contents/IDX/99/IDX99000001.jspx",
+        data=form,
+        headers=HEADERS,
+        timeout=20,
     )
 
-logger.info(
-    "[KRX-SERIES] response_keys=%s",
-    list(body.keys()),
-)
+    r.raise_for_status()
 
-rows = body.get("output") or []
-
-if not rows:
-    safe_body = {}
-
-    for key, value in body.items():
-
-        if isinstance(value, list):
-            safe_body[key] = f"list(len={len(value)})"
-
-        elif isinstance(value, dict):
-            safe_body[key] = (
-                f"dict(keys={list(value.keys())[:10]})"
-            )
-
-        else:
-            safe_body[key] = value
-
-    logger.warning(
-        "[KRX-SERIES] EMPTY RESPONSE "
-        "idx_cd=%s "
-        "ind_tp_cd=%s "
-        "idx_ind_cd=%s "
-        "body=%s",
-        idx_cd,
-        ind_tp_cd,
-        idx_ind_cd,
-        safe_body,
-    )
+    body = r.json() or {}
 
     logger.info(
-        "[KRX-SERIES] rows=%s",
+        "[KRX-SERIES] response_keys=%s",
+        list(body.keys()),
+    )
+
+    rows = body.get("output") or []
+
+    if not rows:
+
+        safe_body = {}
+
+        for key, value in body.items():
+
+            if isinstance(value, list):
+                safe_body[key] = f"list(len={len(value)})"
+
+            elif isinstance(value, dict):
+                safe_body[key] = (
+                    f"dict(keys={list(value.keys())[:10]})"
+                )
+
+            else:
+                safe_body[key] = value
+
+        logger.warning(
+            "[KRX-SERIES] EMPTY RESPONSE "
+            "idx_cd=%s "
+            "ind_tp_cd=%s "
+            "idx_ind_cd=%s "
+            "body=%s",
+            idx_cd,
+            ind_tp_cd,
+            idx_ind_cd,
+            safe_body,
+        )
+
+    logger.info(
+        "[KRX] rows=%s",
         len(rows),
     )
 
@@ -1141,7 +1098,6 @@ if not rows:
             rows[0].get("trd_dd"),
             rows[-1].get("trd_dd"),
         )
-
     else:
         logger.warning(
             "[KRX-SERIES] EMPTY RESULT "
