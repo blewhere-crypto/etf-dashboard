@@ -1259,6 +1259,12 @@ def _build_krx_index_catalog_cache():
                 except requests.RequestException:
                     continue
                 for row in rows:
+                     logger.warning(
+                        "[KRX-CATALOG-ROW] %s",
+                        row,
+                    )
+
+                    break
                     name = row.get("idx_nm")
                     ind_tp_cd = row.get("ind_tp_cd")
                     idx_ind_cd = row.get("idx_ind_cd")
