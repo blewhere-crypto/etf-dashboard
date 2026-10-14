@@ -997,8 +997,8 @@ def fetch_krx_index_daily_series(
     to_date,
 
 ):
-    logger.warning(
-        "========== ENTER fetch_krx_index_daily_series =========="
+    logger.error(
+        "######## KRX DEBUG V2 ########"
     )
 ):
     logger.info(
