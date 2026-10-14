@@ -1,3 +1,12 @@
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
+logger = logging.getLogger("ETF")
+
 import concurrent.futures
 import json
 import os
@@ -992,22 +1001,111 @@ def fetch_krx_index_daily_series(idx_cd, ind_tp_cd, idx_ind_cd, from_date, to_da
     return (r.json() or {}).get("output") or []
  
  
-def fetch_krx_index_risk_stats(idx_cd, ind_tp_cd, idx_ind_cd):
+def fetch_krx_index_risk_stats(
+    idx_cd,
+    ind_tp_cd,
+    idx_ind_cd,
+):
     to_date = datetime.now().strftime("%Y%m%d")
-    from_date = (datetime.now() - timedelta(days=3 * 365 + 14)).strftime("%Y%m%d")
+    from_date = (
+        datetime.now()
+        - timedelta(days=3 * 365 + 14)
+    ).strftime("%Y%m%d")
+
+    logger.info(
+        "[KRX] request "
+        "idx_cd=%s "
+        "ind_tp_cd=%s "
+        "idx_ind_cd=%s "
+        "from=%s "
+        "to=%s",
+        idx_cd,
+        ind_tp_cd,
+        idx_ind_cd,
+        from_date,
+        to_date,
+    )
+
     try:
-        rows = fetch_krx_index_daily_series(idx_cd, ind_tp_cd, idx_ind_cd, from_date, to_date)
-    except (requests.RequestException, ValueError):
+        rows = fetch_krx_index_daily_series(
+            idx_cd,
+            ind_tp_cd,
+            idx_ind_cd,
+            from_date,
+            to_date,
+        )
+
+    except requests.RequestException as e:
+        logger.exception(
+            "[KRX] request failed: %s",
+            e,
+        )
         return None, None, None
-    dates, closes = [], []
+
+    except ValueError as e:
+        logger.exception(
+            "[KRX] parse failed: %s",
+            e,
+        )
+        return None, None, None
+
+    logger.info(
+        "[KRX] rows=%s",
+        len(rows),
+    )
+
+    if rows:
+        logger.info(
+            "[KRX] first=%s last=%s",
+            rows[0].get("trd_dd"),
+            rows[-1].get("trd_dd"),
+        )
+
+    dates = []
+    closes = []
+
     for row in rows:
         d = row.get("trd_dd")
+
         try:
-            dates.append(datetime.strptime(d, "%Y/%m/%d").date() if d else None)
+            dates.append(
+                datetime.strptime(
+                    d,
+                    "%Y/%m/%d"
+                ).date()
+                if d else None
+            )
         except (ValueError, TypeError):
             dates.append(None)
-        closes.append(num(row.get("clsprc_idx")))
-    return compute_risk_stats(dates, closes)
+
+        closes.append(
+            num(
+                row.get("clsprc_idx")
+            )
+        )
+
+    volatility, var975, days_covered = (
+        compute_risk_stats(
+            dates,
+            closes,
+        )
+    )
+
+    logger.info(
+        "[KRX-RISK] "
+        "volatility=%s "
+        "var975=%s "
+        "days=%s",
+        volatility,
+        var975,
+        days_covered,
+    )
+
+    return (
+        volatility,
+        var975,
+        days_covered,
+    )
  
  
 # KRX 자체 산출 커스텀 지수 -- (idx_cd, ind_tp_cd, idx_ind_cd).
@@ -1100,31 +1198,170 @@ def get_krx_index_catalog():
  
  
 def resolve_krx_custom_index(benchmark_name):
-    """지수명으로 (idx_cd, ind_tp_cd, idx_ind_cd)를 찾는다. 첫 배포
-    직후처럼 카탈로그가 아직 안 만들어졌을 때는 빈 매핑이 돌아오고,
-    그러면 호출부가 자연스럽게 다음 폴백(운용사 사이트)으로 넘어간다."""
-    normalized = _compact(normalize_benchmark_name(benchmark_name))
+    normalized = _compact(
+        normalize_benchmark_name(benchmark_name)
+    )
+
     if not normalized:
+        logger.warning(
+            "[KRX-MAP] empty benchmark name"
+        )
         return None
-    return get_krx_index_catalog().get(normalized)
+
+    catalog = get_krx_index_catalog()
+
+    logger.info(
+        "[KRX-MAP] benchmark='%s' normalized='%s' catalog_size=%s",
+        benchmark_name,
+        normalized,
+        len(catalog),
+    )
+
+    # 완전일치
+    result = catalog.get(normalized)
+    if result:
+        logger.info(
+            "[KRX-MAP] exact match found -> %s",
+            result,
+        )
+        return result
+
+    # 부분일치 fallback
+    best = None
+
+    for name, ids in catalog.items():
+        if name in normalized or normalized in name:
+            if best is None or len(name) > len(best[0]):
+                best = (name, ids)
+
+    if best:
+        logger.info(
+            "[KRX-MAP] partial match '%s' -> %s",
+            best[0],
+            best[1],
+        )
+        return best[1]
+
+    logger.warning(
+        "[KRX-MAP] no match found for '%s'",
+        benchmark_name,
+    )
+
+    return None
  
 
-def fetch_benchmark_risk_stats(benchmark_name, krx_code=None, inception_date=None):
-    domestic_code = resolve_domestic_index_code(benchmark_name)
+def fetch_benchmark_risk_stats(
+    benchmark_name,
+    krx_code=None,
+    inception_date=None,
+):
+    logger.info(
+        "[BENCHMARK] start "
+        "benchmark='%s' "
+        "etf=%s",
+        benchmark_name,
+        krx_code,
+    )
+
+    domestic_code = resolve_domestic_index_code(
+        benchmark_name
+    )
+
     if domestic_code:
-        return fetch_domestic_index_risk_stats(domestic_code)
-    overseas_ticker = resolve_overseas_index_ticker(benchmark_name)
+        logger.info(
+            "[BENCHMARK] domestic -> %s",
+            domestic_code,
+        )
+
+        return fetch_domestic_index_risk_stats(
+            domestic_code
+        )
+
+    overseas_ticker = (
+        resolve_overseas_index_ticker(
+            benchmark_name
+        )
+    )
+
     if overseas_ticker:
-        return fetch_overseas_risk_stats(overseas_ticker)
-    fnindex_code = resolve_fnindex_code(benchmark_name)
+        logger.info(
+            "[BENCHMARK] overseas -> %s",
+            overseas_ticker,
+        )
+
+        return fetch_overseas_risk_stats(
+            overseas_ticker
+        )
+
+    fnindex_code = (
+        resolve_fnindex_code(
+            benchmark_name
+        )
+    )
+
     if fnindex_code:
-        return fetch_fnindex_risk_stats(fnindex_code)
-    wiseindex_code = resolve_wiseindex_code(benchmark_name)
+        logger.info(
+            "[BENCHMARK] fnindex -> %s",
+            fnindex_code,
+        )
+
+        return fetch_fnindex_risk_stats(
+            fnindex_code
+        )
+
+    wiseindex_code = (
+        resolve_wiseindex_code(
+            benchmark_name
+        )
+    )
+
     if wiseindex_code:
-        return fetch_wiseindex_risk_stats(wiseindex_code)
-        
+        logger.info(
+            "[BENCHMARK] wiseindex -> %s",
+            wiseindex_code,
+        )
+
+        return fetch_wiseindex_risk_stats(
+            wiseindex_code
+        )
+
+    # KRX 추가
+    krx_index = resolve_krx_custom_index(
+        benchmark_name
+    )
+
+    if krx_index:
+        logger.info(
+            "[BENCHMARK] KRX matched -> %s",
+            krx_index,
+        )
+
+        idx_cd, ind_tp_cd, idx_ind_cd = (
+            krx_index
+        )
+
+        return fetch_krx_index_risk_stats(
+            idx_cd,
+            ind_tp_cd,
+            idx_ind_cd,
+        )
+
+    logger.warning(
+        "[BENCHMARK] KRX not found, issuer fallback"
+    )
+
     if krx_code:
-        return get_issuer_benchmark_risk_stats_cached(krx_code, inception_date)
+        return (
+            get_issuer_benchmark_risk_stats_cached(
+                krx_code,
+                inception_date,
+            )
+        )
+
+    logger.error(
+        "[BENCHMARK] no source found"
+    )
+
     return None, None, None
 
 
