@@ -958,24 +958,58 @@ def get_issuer_benchmark_risk_stats_cached(krx_code, inception_date):
     return entry["result"] if entry else (None, None, None)
 
 def fetch_krx_otp(bld, form):
-    """KRX 지수정보시스템(index.krx.co.kr)은 실제 데이터를 주기 전에
-    1회용 OTP 토큰을 먼저 발급받아야 한다. bld는 어떤 데이터 블록을
-    요청하는지 식별하는 값(페이지마다 다름), form은 그 블록이 필요로
-    하는 조회 조건(지수 코드, 기간 등)이다."""
-    params = {"bld": bld, "name": "form", **form}
+    logger.info(
+        "[KRX-OTP] request bld=%s",
+        bld,
+    )
+
+    params = {
+        "bld": bld,
+        "name": "form",
+        **form,
+    }
+
     r = requests.get(
         "https://index.krx.co.kr/contents/COM/GenerateOTP.jspx",
         params=params,
         headers=HEADERS,
         timeout=10,
     )
+
     r.raise_for_status()
-    return r.text.strip()
+
+    otp = r.text.strip()
+
+    logger.info(
+        "[KRX-OTP] response status=%s otp_length=%s",
+        r.status_code,
+        len(otp),
+    )
+
+    return otp
  
  
-def fetch_krx_index_daily_series(idx_cd, ind_tp_cd, idx_ind_cd, from_date, to_date):
-    """KRX 자체 산출 지수의 일별 종가 히스토리. OTP를 발급받은 뒤 같은
-    조건으로 IDX99000001.jspx에 POST하면 JSON으로 받는다."""
+def fetch_krx_index_daily_series(
+    idx_cd,
+    ind_tp_cd,
+    idx_ind_cd,
+    from_date,
+    to_date,
+):
+    logger.info(
+        "[KRX-SERIES] start "
+        "idx_cd=%s "
+        "ind_tp_cd=%s "
+        "idx_ind_cd=%s "
+        "from=%s "
+        "to=%s",
+        idx_cd,
+        ind_tp_cd,
+        idx_ind_cd,
+        from_date,
+        to_date,
+    )
+
     form = {
         "idx_cd": idx_cd,
         "ind_tp_cd": ind_tp_cd,
@@ -989,16 +1023,54 @@ def fetch_krx_index_daily_series(idx_cd, ind_tp_cd, idx_ind_cd, from_date, to_da
         "todate": to_date,
         "pagePath": "/contents/MKD/03/0304/03040101/MKD03040101T2.jsp",
     }
-    otp = fetch_krx_otp("/IDX/03/0304/03040101/mkd03040101_02", form)
+
+    otp = fetch_krx_otp(
+        "/IDX/03/0304/03040101/mkd03040101_02",
+        form,
+    )
+
     form["code"] = otp
+
+    logger.info(
+        "[KRX-SERIES] OTP acquired"
+    )
+
     r = requests.post(
         "https://index.krx.co.kr/contents/IDX/99/IDX99000001.jspx",
         data=form,
         headers=HEADERS,
         timeout=20,
     )
+
     r.raise_for_status()
-    return (r.json() or {}).get("output") or []
+
+    body = r.json() or {}
+    rows = body.get("output") or []
+
+    logger.info(
+        "[KRX-SERIES] rows=%s",
+        len(rows),
+    )
+
+    if rows:
+        logger.info(
+            "[KRX-SERIES] first=%s last=%s",
+            rows[0].get("trd_dd"),
+            rows[-1].get("trd_dd"),
+        )
+
+    else:
+        logger.warning(
+            "[KRX-SERIES] EMPTY RESULT "
+            "idx_cd=%s "
+            "ind_tp_cd=%s "
+            "idx_ind_cd=%s",
+            idx_cd,
+            ind_tp_cd,
+            idx_ind_cd,
+        )
+
+    return rows
  
  
 def fetch_krx_index_risk_stats(
@@ -1006,25 +1078,22 @@ def fetch_krx_index_risk_stats(
     ind_tp_cd,
     idx_ind_cd,
 ):
+    logger.info(
+        "[KRX-RISK] begin "
+        "idx_cd=%s "
+        "ind_tp_cd=%s "
+        "idx_ind_cd=%s",
+        idx_cd,
+        ind_tp_cd,
+        idx_ind_cd,
+    )
+
     to_date = datetime.now().strftime("%Y%m%d")
+
     from_date = (
         datetime.now()
         - timedelta(days=3 * 365 + 14)
     ).strftime("%Y%m%d")
-
-    logger.info(
-        "[KRX] request "
-        "idx_cd=%s "
-        "ind_tp_cd=%s "
-        "idx_ind_cd=%s "
-        "from=%s "
-        "to=%s",
-        idx_cd,
-        ind_tp_cd,
-        idx_ind_cd,
-        from_date,
-        to_date,
-    )
 
     try:
         rows = fetch_krx_index_daily_series(
@@ -1035,31 +1104,17 @@ def fetch_krx_index_risk_stats(
             to_date,
         )
 
-    except requests.RequestException as e:
+    except requests.RequestException:
         logger.exception(
-            "[KRX] request failed: %s",
-            e,
+            "[KRX-RISK] request failed"
         )
         return None, None, None
 
-    except ValueError as e:
+    except Exception:
         logger.exception(
-            "[KRX] parse failed: %s",
-            e,
+            "[KRX-RISK] unexpected error"
         )
         return None, None, None
-
-    logger.info(
-        "[KRX] rows=%s",
-        len(rows),
-    )
-
-    if rows:
-        logger.info(
-            "[KRX] first=%s last=%s",
-            rows[0].get("trd_dd"),
-            rows[-1].get("trd_dd"),
-        )
 
     dates = []
     closes = []
@@ -1071,11 +1126,11 @@ def fetch_krx_index_risk_stats(
             dates.append(
                 datetime.strptime(
                     d,
-                    "%Y/%m/%d"
+                    "%Y/%m/%d",
                 ).date()
                 if d else None
             )
-        except (ValueError, TypeError):
+        except Exception:
             dates.append(None)
 
         closes.append(
@@ -1084,28 +1139,22 @@ def fetch_krx_index_risk_stats(
             )
         )
 
-    volatility, var975, days_covered = (
-        compute_risk_stats(
-            dates,
-            closes,
-        )
+    logger.info(
+        "[KRX-RISK] valid_rows=%s",
+        len(closes),
+    )
+
+    result = compute_risk_stats(
+        dates,
+        closes,
     )
 
     logger.info(
-        "[KRX-RISK] "
-        "volatility=%s "
-        "var975=%s "
-        "days=%s",
-        volatility,
-        var975,
-        days_covered,
+        "[KRX-RISK] result=%s",
+        result,
     )
 
-    return (
-        volatility,
-        var975,
-        days_covered,
-    )
+    return result
  
  
 # KRX 자체 산출 커스텀 지수 -- (idx_cd, ind_tp_cd, idx_ind_cd).
@@ -1198,6 +1247,12 @@ def get_krx_index_catalog():
  
  
 def resolve_krx_custom_index(benchmark_name):
+    if benchmark_name == "코스피 200 금융 고배당 TOP 10 지수":
+    logger.info(
+        "[KRX-MAP] TEST HARD CODED"
+    )
+    return ("1359", "1", "359")
+    
     normalized = _compact(
         normalize_benchmark_name(benchmark_name)
     )
