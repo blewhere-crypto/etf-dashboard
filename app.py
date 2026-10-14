@@ -995,6 +995,11 @@ def fetch_krx_index_daily_series(
     idx_ind_cd,
     from_date,
     to_date,
+
+):
+    logger.warning(
+        "========== ENTER fetch_krx_index_daily_series =========="
+    )
 ):
     logger.info(
         "[KRX-SERIES] start "
