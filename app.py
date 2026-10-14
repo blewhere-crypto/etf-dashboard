@@ -1297,6 +1297,10 @@ def get_krx_index_catalog():
  
 def resolve_krx_custom_index(benchmark_name):
     if benchmark_name == "코스피 200 금융 고배당 TOP 10 지수":
+        logger.warning(
+        "[KRX-MAP] FORCE TEST 1359"
+    )
+    return ("1359", "1", "359") 
     logger.info(
         "[KRX-MAP] TEST HARD CODED"
     )
