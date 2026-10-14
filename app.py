@@ -1036,16 +1036,37 @@ def fetch_krx_index_daily_series(
     )
 
     r = requests.post(
-        "https://index.krx.co.kr/contents/IDX/99/IDX99000001.jspx",
-        data=form,
-        headers=HEADERS,
-        timeout=20,
+    "https://index.krx.co.kr/contents/IDX/99/IDX99000001.jspx",
+    data=form,
+    headers=HEADERS,
+    timeout=20,
+)
+
+r.raise_for_status()
+
+ r = requests.post(
+    "https://index.krx.co.kr/contents/IDX/99/IDX99000001.jspx",
+    data=form,
+    headers=HEADERS,
+    timeout=20,
+)
+
+r.raise_for_status()
+
+body = r.json() or {}
+
+logger.info(
+    "[KRX-SERIES] response_keys=%s",
+    list(body.keys()),
+)
+
+if not body.get("output"):
+    logger.warning(
+        "[KRX-SERIES] empty_response=%s",
+        body,
     )
 
-    r.raise_for_status()
-
-    body = r.json() or {}
-    rows = body.get("output") or []
+rows = body.get("output") or []
 
     logger.info(
         "[KRX-SERIES] rows=%s",
@@ -1407,7 +1428,7 @@ def fetch_benchmark_risk_stats(
                 krx_index
             )
 
-            result = fetch_krx_index_risk_stats(
+            result = (
                 idx_cd,
                 ind_tp_cd,
                 idx_ind_cd,
