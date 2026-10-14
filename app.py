@@ -1256,13 +1256,16 @@ def fetch_benchmark_risk_stats(
     inception_date=None,
 ):
     logger.info(
-        "[BENCHMARK] start "
-        "benchmark='%s' "
-        "etf=%s",
+        "[BENCHMARK] start benchmark='%s' etf=%s",
         benchmark_name,
         krx_code,
     )
 
+    benchmark_name = benchmark_name or ""
+
+    # -----------------------------
+    # 1. 국내 대표지수
+    # -----------------------------
     domestic_code = resolve_domestic_index_code(
         benchmark_name
     )
@@ -1277,6 +1280,9 @@ def fetch_benchmark_risk_stats(
             domestic_code
         )
 
+    # -----------------------------
+    # 2. 해외 대표지수
+    # -----------------------------
     overseas_ticker = (
         resolve_overseas_index_ticker(
             benchmark_name
@@ -1293,10 +1299,11 @@ def fetch_benchmark_risk_stats(
             overseas_ticker
         )
 
-    fnindex_code = (
-        resolve_fnindex_code(
-            benchmark_name
-        )
+    # -----------------------------
+    # 3. FnGuide
+    # -----------------------------
+    fnindex_code = resolve_fnindex_code(
+        benchmark_name
     )
 
     if fnindex_code:
@@ -1309,10 +1316,60 @@ def fetch_benchmark_risk_stats(
             fnindex_code
         )
 
-    wiseindex_code = (
-        resolve_wiseindex_code(
+    # =================================================
+    # KRX 관련 키워드 포함 시 KRX 우선 조회
+    # =================================================
+    krx_keywords = (
+        "KRX",
+        "코스피",
+        "코스닥",
+        "KOSPI",
+        "KOSDAQ",
+        
+    )
+
+    should_try_krx_first = any(
+        keyword.lower() in benchmark_name.lower()
+        for keyword in krx_keywords
+    )
+
+    if should_try_krx_first:
+        logger.info(
+            "[BENCHMARK] KRX priority enabled"
+        )
+
+        krx_index = resolve_krx_custom_index(
             benchmark_name
         )
+
+        if krx_index:
+            logger.info(
+                "[BENCHMARK] krx -> %s",
+                krx_index,
+            )
+
+            idx_cd, ind_tp_cd, idx_ind_cd = (
+                krx_index
+            )
+
+            result = fetch_krx_index_risk_stats(
+                idx_cd,
+                ind_tp_cd,
+                idx_ind_cd,
+            )
+
+            if result[0] is not None:
+                return result
+
+            logger.warning(
+                "[BENCHMARK] KRX returned no data, fallback to WISE"
+            )
+
+    # =================================================
+    # WISE
+    # =================================================
+    wiseindex_code = resolve_wiseindex_code(
+        benchmark_name
     )
 
     if wiseindex_code:
@@ -1321,45 +1378,57 @@ def fetch_benchmark_risk_stats(
             wiseindex_code,
         )
 
-        return fetch_wiseindex_risk_stats(
+        result = fetch_wiseindex_risk_stats(
             wiseindex_code
         )
 
-    # KRX 추가
-    krx_index = resolve_krx_custom_index(
-        benchmark_name
-    )
+        if result[0] is not None:
+            return result
 
-    if krx_index:
-        logger.info(
-            "[BENCHMARK] KRX matched -> %s",
-            krx_index,
+    # =================================================
+    # KRX 2차 시도
+    # (KRX 키워드가 없는 경우)
+    # =================================================
+    if not should_try_krx_first:
+        krx_index = resolve_krx_custom_index(
+            benchmark_name
         )
 
-        idx_cd, ind_tp_cd, idx_ind_cd = (
-            krx_index
-        )
+        if krx_index:
+            logger.info(
+                "[BENCHMARK] krx fallback -> %s",
+                krx_index,
+            )
 
-        return fetch_krx_index_risk_stats(
-            idx_cd,
-            ind_tp_cd,
-            idx_ind_cd,
-        )
+            idx_cd, ind_tp_cd, idx_ind_cd = (
+                krx_index
+            )
 
+            result = fetch_krx_index_risk_stats(
+                idx_cd,
+                ind_tp_cd,
+                idx_ind_cd,
+            )
+
+            if result[0] is not None:
+                return result
+
+    # =================================================
+    # 운용사 사이트
+    # =================================================
     logger.warning(
-        "[BENCHMARK] KRX not found, issuer fallback"
+        "[BENCHMARK] issuer fallback"
     )
 
     if krx_code:
-        return (
-            get_issuer_benchmark_risk_stats_cached(
-                krx_code,
-                inception_date,
-            )
+        return get_issuer_benchmark_risk_stats_cached(
+            krx_code,
+            inception_date,
         )
 
     logger.error(
-        "[BENCHMARK] no source found"
+        "[BENCHMARK] no source found benchmark='%s'",
+        benchmark_name,
     )
 
     return None, None, None
