@@ -1485,9 +1485,7 @@ def fetch_benchmark_risk_stats(
 
     benchmark_name = benchmark_name or ""
 
-    # -----------------------------
-    # 1. 국내 대표지수
-    # -----------------------------
+    # 1. 네이버 국내 대표지수
     domestic_code = resolve_domestic_index_code(
         benchmark_name
     )
@@ -1498,17 +1496,20 @@ def fetch_benchmark_risk_stats(
             domestic_code,
         )
 
-        return fetch_domestic_index_risk_stats(
+        result = fetch_domestic_index_risk_stats(
             domestic_code
         )
 
-    # -----------------------------
-    # 2. 해외 대표지수
-    # -----------------------------
-    overseas_ticker = (
-        resolve_overseas_index_ticker(
-            benchmark_name
+        if result[0] is not None:
+            return result
+
+        logger.warning(
+            "[BENCHMARK] domestic source returned no data"
         )
+
+    # 2. 야후 해외 대표지수
+    overseas_ticker = resolve_overseas_index_ticker(
+        benchmark_name
     )
 
     if overseas_ticker:
@@ -1517,13 +1518,18 @@ def fetch_benchmark_risk_stats(
             overseas_ticker,
         )
 
-        return fetch_overseas_risk_stats(
+        result = fetch_overseas_risk_stats(
             overseas_ticker
         )
 
-    # -----------------------------
+        if result[0] is not None:
+            return result
+
+        logger.warning(
+            "[BENCHMARK] overseas source returned no data"
+        )
+
     # 3. FnGuide
-    # -----------------------------
     fnindex_code = resolve_fnindex_code(
         benchmark_name
     )
@@ -1534,70 +1540,111 @@ def fetch_benchmark_risk_stats(
             fnindex_code,
         )
 
-        return fetch_fnindex_risk_stats(
+        result = fetch_fnindex_risk_stats(
             fnindex_code
         )
 
-    # =================================================
-    # KRX 관련 키워드 포함 시 KRX 우선 조회
-    # =================================================
+        if result[0] is not None:
+            return result
+
+        logger.warning(
+            "[BENCHMARK] FnGuide returned no data"
+        )
+
+    # KRX 관련 키워드가 포함되면 WISE보다 KRX를 먼저 조회
     krx_keywords = (
         "KRX",
         "코스피",
         "코스닥",
         "KOSPI",
         "KOSDAQ",
-        
     )
 
+    benchmark_name_lower = benchmark_name.lower()
+
     should_try_krx_first = any(
-        keyword.lower() in benchmark_name.lower()
+        keyword.lower() in benchmark_name_lower
         for keyword in krx_keywords
     )
 
+    # 4. KRX 우선 조회
     if should_try_krx_first:
         logger.info(
             "[BENCHMARK] KRX priority enabled"
         )
 
-        krx_index = resolve_krx_custom_index(
-            benchmark_name
-        )
-
-        if krx_index:
-
-    logger.error(
-        "[DEBUG-1] krx_index=%s",
-        krx_index,
-    )
-
-    idx_cd, ind_tp_cd, idx_ind_cd = krx_index
-
-    logger.error(
-        "[DEBUG-2] unpack complete"
-    )
-
-    result = fetch_krx_index_risk_stats(
-        idx_cd,
-        ind_tp_cd,
-        idx_ind_cd,
-    )
-
-    logger.error(
-        "[DEBUG-3] risk stats returned=%s",
-        result,
-    )
-
-    if result[0] is not None:
-        return result
-
-            logger.warning(
-                "[BENCHMARK] KRX returned no data, fallback to WISE"
+        try:
+            krx_index = resolve_krx_custom_index(
+                benchmark_name
             )
 
-    # =================================================
-    # WISE
-    # =================================================
+            logger.info(
+                "[BENCHMARK] KRX resolver result=%s",
+                krx_index,
+            )
+
+            if krx_index:
+                logger.error(
+                    "[DEBUG-1] krx_index=%s",
+                    krx_index,
+                )
+
+                if (
+                    not isinstance(krx_index, (tuple, list))
+                    or len(krx_index) != 3
+                ):
+                    logger.error(
+                        "[BENCHMARK] invalid KRX mapping: %r",
+                        krx_index,
+                    )
+                else:
+                    idx_cd, ind_tp_cd, idx_ind_cd = krx_index
+
+                    logger.error(
+                        "[DEBUG-2] unpack complete "
+                        "idx_cd=%s "
+                        "ind_tp_cd=%s "
+                        "idx_ind_cd=%s",
+                        idx_cd,
+                        ind_tp_cd,
+                        idx_ind_cd,
+                    )
+
+                    result = fetch_krx_index_risk_stats(
+                        idx_cd,
+                        ind_tp_cd,
+                        idx_ind_cd,
+                    )
+
+                    logger.error(
+                        "[DEBUG-3] risk stats returned=%s",
+                        result,
+                    )
+
+                    if (
+                        isinstance(result, (tuple, list))
+                        and len(result) == 3
+                        and result[0] is not None
+                    ):
+                        return result
+
+                    logger.warning(
+                        "[BENCHMARK] KRX returned no data, "
+                        "fallback to WISE"
+                    )
+            else:
+                logger.warning(
+                    "[BENCHMARK] KRX index mapping not found, "
+                    "fallback to WISE"
+                )
+
+        except Exception:
+            logger.exception(
+                "[BENCHMARK] KRX priority lookup failed, "
+                "fallback to WISE"
+            )
+
+    # 5. WISE
     wiseindex_code = resolve_wiseindex_code(
         benchmark_name
     )
@@ -1608,44 +1655,71 @@ def fetch_benchmark_risk_stats(
             wiseindex_code,
         )
 
-        result = fetch_wiseindex_risk_stats(
-            wiseindex_code
-        )
-
-        if result[0] is not None:
-            return result
-
-    # =================================================
-    # KRX 2차 시도
-    # (KRX 키워드가 없는 경우)
-    # =================================================
-    if not should_try_krx_first:
-        krx_index = resolve_krx_custom_index(
-            benchmark_name
-        )
-
-        if krx_index:
-            logger.info(
-                "[BENCHMARK] krx fallback -> %s",
-                krx_index,
+        try:
+            result = fetch_wiseindex_risk_stats(
+                wiseindex_code
             )
 
-            idx_cd, ind_tp_cd, idx_ind_cd = (
-                krx_index
-            )
-
-            result = fetch_krx_index_risk_stats(
-                idx_cd,
-                ind_tp_cd,
-                idx_ind_cd,
-            )
-
-            if result[0] is not None:
+            if (
+                isinstance(result, (tuple, list))
+                and len(result) == 3
+                and result[0] is not None
+            ):
                 return result
 
-    # =================================================
-    # 운용사 사이트
-    # =================================================
+            logger.warning(
+                "[BENCHMARK] WISE returned no data"
+            )
+
+        except Exception:
+            logger.exception(
+                "[BENCHMARK] WISE lookup failed"
+            )
+
+    # 6. KRX 2차 조회
+    # KRX 키워드는 없지만 KRX 카탈로그에 등록된 지수일 수 있음
+    if not should_try_krx_first:
+        try:
+            krx_index = resolve_krx_custom_index(
+                benchmark_name
+            )
+
+            if krx_index:
+                logger.info(
+                    "[BENCHMARK] krx fallback -> %s",
+                    krx_index,
+                )
+
+                if (
+                    isinstance(krx_index, (tuple, list))
+                    and len(krx_index) == 3
+                ):
+                    idx_cd, ind_tp_cd, idx_ind_cd = krx_index
+
+                    result = fetch_krx_index_risk_stats(
+                        idx_cd,
+                        ind_tp_cd,
+                        idx_ind_cd,
+                    )
+
+                    if (
+                        isinstance(result, (tuple, list))
+                        and len(result) == 3
+                        and result[0] is not None
+                    ):
+                        return result
+                else:
+                    logger.error(
+                        "[BENCHMARK] invalid KRX fallback mapping: %r",
+                        krx_index,
+                    )
+
+        except Exception:
+            logger.exception(
+                "[BENCHMARK] KRX fallback lookup failed"
+            )
+
+    # 7. 운용사 사이트
     logger.warning(
         "[BENCHMARK] issuer fallback"
     )
