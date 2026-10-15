@@ -1565,23 +1565,31 @@ def fetch_benchmark_risk_stats(
         )
 
         if krx_index:
-            logger.info(
-                "[BENCHMARK] krx -> %s",
-                krx_index,
-            )
 
-            idx_cd, ind_tp_cd, idx_ind_cd = (
-                krx_index
-            )
+    logger.error(
+        "[DEBUG-1] krx_index=%s",
+        krx_index,
+    )
 
-           result = fetch_krx_index_risk_stats(
-               idx_cd,
-               ind_tp_cd,
-               idx_ind_cd,
-            )
+    idx_cd, ind_tp_cd, idx_ind_cd = krx_index
 
-            if result[0] is not None:
-                return result
+    logger.error(
+        "[DEBUG-2] unpack complete"
+    )
+
+    result = fetch_krx_index_risk_stats(
+        idx_cd,
+        ind_tp_cd,
+        idx_ind_cd,
+    )
+
+    logger.error(
+        "[DEBUG-3] risk stats returned=%s",
+        result,
+    )
+
+    if result[0] is not None:
+        return result
 
             logger.warning(
                 "[BENCHMARK] KRX returned no data, fallback to WISE"
