@@ -997,6 +997,15 @@ def fetch_krx_index_daily_series(
     to_date,
 ):
     logger.error(
+    "[KRX-SERIES] ENTER "
+    "idx_cd=%s "
+    "ind_tp_cd=%s "
+    "idx_ind_cd=%s",
+    idx_cd,
+    ind_tp_cd,
+    idx_ind_cd,
+)
+    logger.error(
         "######## KRX DEBUG V2 ########"
     )
 
