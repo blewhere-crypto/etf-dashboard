@@ -1574,10 +1574,10 @@ def fetch_benchmark_risk_stats(
                 krx_index
             )
 
-            result = (
-                idx_cd,
-                ind_tp_cd,
-                idx_ind_cd,
+           result = fetch_krx_index_risk_stats(
+               idx_cd,
+               ind_tp_cd,
+               idx_ind_cd,
             )
 
             if result[0] is not None:
