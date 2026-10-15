@@ -1242,44 +1242,134 @@ _KRX_INDEX_CATALOG_FAILURE_RETRY_SECONDS = 3600
  
  
 def _build_krx_index_catalog_cache():
-    """카테고리 조합들을 병렬로 돌면서 '지수명(정규화) -> (idx_cd,
-    ind_tp_cd, idx_ind_cd)' 전체 매핑을 만든다. 이 앱의 다른 무거운
-    카탈로그 빌더들(FnGuide/WISE 이름 목록 등)과 같은 패턴 -- 한 번
-    빌드되면 오래 캐시해두고, 요청 경로에서는 절대 기다리지 않는다."""
+    """
+    카테고리 조합들을 병렬로 돌면서
+    '정규화된 지수명 -> (idx_cd, ind_tp_cd, idx_ind_cd)'
+    매핑을 만든다.
+    """
+
+    logger.warning(
+        "[KRX-CATALOG] BUILD START"
+    )
+
     got_data = False
+
     try:
         mapping = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        sample_logged = False
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=2
+        ) as ex:
+
             futures = {
-                ex.submit(fetch_krx_index_category, u, m): (u, m) for u, m in _KRX_CATEGORY_RANGE
+                ex.submit(
+                    fetch_krx_index_category,
+                    u,
+                    m,
+                ): (u, m)
+                for u, m in _KRX_CATEGORY_RANGE
             }
-            for fut in concurrent.futures.as_completed(futures):
+
+            for fut in concurrent.futures.as_completed(
+                futures
+            ):
                 try:
                     rows = fut.result()
-                except requests.RequestException:
-                    continue
-                for row in rows:
-                     logger.warning(
-                        "[KRX-CATALOG-ROW] %s",
-                        row,
+
+                except requests.RequestException as e:
+
+                    logger.warning(
+                        "[KRX-CATALOG] category failed: %s",
+                        e,
                     )
 
-                    break
+                    continue
+
+                except Exception as e:
+
+                    logger.warning(
+                        "[KRX-CATALOG] unexpected error: %s",
+                        e,
+                    )
+
+                    continue
+
+                for row in rows:
+
+                    #
+                    # 샘플 1건만 출력
+                    #
+                    if not sample_logged:
+                        logger.warning(
+                            "[KRX-CATALOG-SAMPLE] %s",
+                            row,
+                        )
+                        sample_logged = True
+
                     name = row.get("idx_nm")
                     ind_tp_cd = row.get("ind_tp_cd")
                     idx_ind_cd = row.get("idx_ind_cd")
-                    if name and ind_tp_cd and idx_ind_cd:
-                        idx_cd = f"{ind_tp_cd}{idx_ind_cd}"
-                        mapping[_compact(normalize_benchmark_name(name))] = (idx_cd, ind_tp_cd, idx_ind_cd)
+
+                    if not (
+                        name
+                        and ind_tp_cd
+                        and idx_ind_cd
+                    ):
+                        continue
+
+                    #
+                    # 현재 사용 중인 방식
+                    #
+                    idx_cd = (
+                        f"{ind_tp_cd}"
+                        f"{idx_ind_cd}"
+                    )
+
+                    mapping[
+                        _compact(
+                            normalize_benchmark_name(
+                                name
+                            )
+                        )
+                    ] = (
+                        idx_cd,
+                        ind_tp_cd,
+                        idx_ind_cd,
+                    )
+
         got_data = bool(mapping)
-        if got_data:
-            _krx_index_catalog_cache["map"] = mapping
-    finally:
-        now = time.time()
-        _krx_index_catalog_cache["fetched_at"] = (
-            now if got_data
-            else now - (_KRX_INDEX_CATALOG_TTL_SECONDS - _KRX_INDEX_CATALOG_FAILURE_RETRY_SECONDS)
+
+        logger.warning(
+            "[KRX-CATALOG] BUILD COMPLETE size=%s",
+            len(mapping),
         )
+
+        if got_data:
+            _krx_index_catalog_cache["map"] = (
+                mapping
+            )
+
+    except Exception:
+
+        logger.exception(
+            "[KRX-CATALOG] BUILD FAILED"
+        )
+
+    finally:
+
+        now = time.time()
+
+        _krx_index_catalog_cache["fetched_at"] = (
+            now
+            if got_data
+            else now
+            - (
+                _KRX_INDEX_CATALOG_TTL_SECONDS
+                - _KRX_INDEX_CATALOG_FAILURE_RETRY_SECONDS
+            )
+        )
+
         _krx_index_catalog_cache["building"] = False
  
  
