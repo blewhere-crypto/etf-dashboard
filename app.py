@@ -1121,8 +1121,8 @@ def fetch_krx_index_risk_stats(
     ind_tp_cd,
     idx_ind_cd,
 ):
-    logger.info(
-        "[KRX-RISK] begin "
+    logger.warning(
+        "[KRX-RISK] ENTER "
         "idx_cd=%s "
         "ind_tp_cd=%s "
         "idx_ind_cd=%s",
@@ -1147,57 +1147,72 @@ def fetch_krx_index_risk_stats(
             to_date,
         )
 
-    except requests.RequestException:
-        logger.exception(
-            "[KRX-RISK] request failed"
+        logger.warning(
+            "[KRX-RISK] rows_received=%s",
+            len(rows) if rows else 0,
         )
-        return None, None, None
 
-    except Exception:
+    except Exception as e:
+
         logger.exception(
-            "[KRX-RISK] unexpected error"
+            "[KRX-RISK] FETCH FAILED: %s",
+            e,
         )
+
         return None, None, None
 
     dates = []
     closes = []
 
-    for row in rows:
-        d = row.get("trd_dd")
+    try:
 
-        try:
-            dates.append(
-                datetime.strptime(
-                    d,
-                    "%Y/%m/%d",
-                ).date()
-                if d else None
-            )
-        except Exception:
-            dates.append(None)
+        for row in rows:
 
-        closes.append(
-            num(
-                row.get("clsprc_idx")
+            d = row.get("trd_dd")
+
+            try:
+                dates.append(
+                    datetime.strptime(
+                        d,
+                        "%Y/%m/%d",
+                    ).date()
+                    if d else None
+                )
+
+            except Exception:
+                dates.append(None)
+
+            closes.append(
+                num(
+                    row.get("clsprc_idx")
+                )
             )
+
+        logger.warning(
+            "[KRX-RISK] valid_rows=%s",
+            len(closes),
         )
 
-    logger.info(
-        "[KRX-RISK] valid_rows=%s",
-        len(closes),
-    )
+        result = compute_risk_stats(
+            dates,
+            closes,
+        )
 
-    result = compute_risk_stats(
-        dates,
-        closes,
-    )
+        logger.warning(
+            "[KRX-RISK] result=%s",
+            result,
+        )
 
-    logger.info(
-        "[KRX-RISK] result=%s",
-        result,
-    )
+        return result
 
-    return result
+    except Exception as e:
+
+        logger.exception(
+            "[KRX-RISK] COMPUTE FAILED: %s",
+            e,
+        )
+
+        return None, None, None
  
  
 # KRX 자체 산출 커스텀 지수 -- (idx_cd, ind_tp_cd, idx_ind_cd).
